@@ -6,37 +6,41 @@
 
 <a id="english"></a>
 
-# Misga fork — dual-SIM, smarter spam, retroactive rules
+# Misga fork — dual-SIM, spam triage, reliable filters
 
-A fork of [mirarr-app/Misga](https://github.com/mirarr-app/Misga) — an Android SMS app for Iran's spam-heavy SMS situation — with extra features on top.
+A fork of [mirarr-app/Misga](https://github.com/mirarr-app/Misga) (upstream v1.1.0), an Android SMS app built for Iran's spam-heavy messaging environment. This fork focuses on dual-SIM usage, spam triage, and filter reliability. The filter engine, allowlist priority, Filter Studio, and Material 3 UI remain unchanged.
 
-## What's new in this fork
+## How this fork differs from upstream
 
-- **Dual-SIM sending** — a `SIM 1 / SIM 2` switch inside the message field (Chat + New Message), per-conversation memory, and a tiny `from/via SIM` label under every message.
-- **Spam controls in place** — `All / Hide spam / Spam only` chips above the inbox (bulk-delete spams from `Spam only`), plus a quiet in-app note when new spam arrives (no system notification).
-- **Rules apply retroactively** — changing a rule re-evaluates all stored messages; messages you manually un-spammed stay untouched. Duplicate rules are rejected with a hint.
-- **Ghost-thread fixes** — search no longer creates empty threads, no empty thread on unsent compose, phantom threads hidden, MMS-only chats explain themselves.
-- **Shortcode identity** — `100065`, `+98100065` and `0100065` are treated as one sender (same for landlines).
+| Area | Upstream | This fork |
+|---|---|---|
+| Dual-SIM sending | Always sends via the system default SIM | In-field `SIM 1 / SIM 2` switch (chat and compose), per-conversation SIM memory, and a subtle `from/via SIM` caption under each message |
+| Spam handling | Spam stays inline with a badge | `All / Hide spam / Spam only` filter chips (bulk-delete from `Spam only`); a silent in-app notice on new arrivals, no system notification |
+| Copying text | Whole message only | Select and copy any span (long-press → dialog → select) |
+| Rule edits | Affect new messages only | Re-evaluates all stored messages (manual Not-Spam decisions are preserved); duplicate rules are rejected with a hint |
+| Rule order | Fixed, newest first | Same visible order, now backed by a persistent `sort_order` (DB v4) |
+| Ghost threads | Search and compose can fabricate empty threads; one shortcode may split by prefix | No fabricated threads; phantom rows stay hidden; MMS-only chats explain themselves; shortcodes unify with and without the `+98` prefix |
+| Tests | 47 unit tests | 50 unit tests |
 
 ## Install
 
-Android 8.0 (API 26)+. Set Misga as the **default SMS app** so it can intercept messages.
+Requires Android 8.0 (API 26) or newer. Set Misga as the **default SMS app** so it can intercept messages in real time.
 
 ## Build from source
 
-JDK 17 + Android SDK:
+Requires JDK 17 and the Android SDK:
 
 ```bash
 ./gradlew assembleDebug
 ```
 
-APK goes to `app/build/outputs/apk/debug/`.
+The debug APK is written to `app/build/outputs/apk/debug/`.
 
 ## License
 
-GNU GPL v3 — same as the original. See [LICENSE](LICENSE).
+GNU General Public License v3.0 — same as upstream. See [LICENSE](LICENSE).
 
-Original work by [mirarr-app/Misga](https://github.com/mirarr-app/Misga); fork modifications are also GPL-3.0. If you distribute the APK, keep the source available.
+The original work is by [mirarr-app/Misga](https://github.com/mirarr-app/Misga); all fork modifications are likewise GPL-3.0. If you distribute the APK, the corresponding source must remain available.
 
 ---
 
@@ -44,24 +48,27 @@ Original work by [mirarr-app/Misga](https://github.com/mirarr-app/Misga); fork m
 
 <div dir="rtl" lang="fa">
 
-# فورک میسگا — دوسیم‌کارته، اسپم هوشمندتر، قوانین عطف‌به‌ماسبق
+# فورک میسگا — دوسیم‌کارته، مدیریت اسپم، فیلترهای قابل‌اعتماد
 
-فورکی از [mirarr-app/Misga](https://github.com/mirarr-app/Misga) — برنامه پیامک اندروید برای وضعیت پراسپم ایران — با چند قابلیت اضافه.
+فورکی از [mirarr-app/Misga](https://github.com/mirarr-app/Misga) (نسخهٔ ۱٫۱٫۰)؛ برنامهٔ پیامک اندروید برای فضای پراسپم ایران. تمرکز این فورک روی کار با دو سیم‌کارت، مدیریت اسپم و قابل‌اعتماد بودن فیلترهاست. موتور فیلتر، اولویت Allowlist، استودیو فیلتر و رابط Material 3 بدون تغییر مانده‌اند.
 
-## چیزهای جدید این فورک
+## تفاوت این فورک با نسخهٔ اصلی
 
-- **ارسال دوسیم‌کارته** — سوییچ `SIM 1 / SIM 2` داخل فیلد پیام (چت و پیام جدید)، یادآوری سیم هر مکالمه، و لیبل کوچک `from/via SIM` زیر هر پیام.
-- **کنترل اسپم سر جاش** — چیپ‌های `All / Hide spam / Spam only` بالای لیست (حذف دسته‌ای از حالت Spam only) + اطلاع داخل برنامه موقع اسپم جدید (بدون نوتیف سیستمی).
-- **اعمال قوانین به گذشته** — با تغییر قانون، همه پیام‌های ذخیره‌شده دوباره ارزیابی می‌شن؛ پیامی که دستی Not-Spam کردی دست نمی‌خوره. قانون تکراری با پیام رد می‌شه.
-- **رفع تردهای گوست** — سرچ دیگه ترد خالی نمی‌سازه، چت خالی برای MMS توضیح می‌ده.
-- **یکپارچگی شرت‌کد** — `100065` و `+98100065` یه فرستنده حساب می‌شن.
+| بخش | نسخهٔ اصلی | این فورک |
+|---|---|---|
+| ارسال دوسیم‌کارته | همیشه با سیم پیش‌فرض سیستم | سوییچ `SIM 1 / SIM 2` داخل فیلد پیام (چت و پیام جدید)، یادآوری سیم هر مکالمه، و برچسب کوچک زیر هر پیام |
+| مدیریت اسپم | فقط نشان داخل لیست | چیپ‌های All/Hide/Spam only (حذف دسته‌ای)، اطلاع‌رسانی داخل برنامه بدون نوتیفیکیشن سیستمی |
+| کپی متن | فقط کل پیام | انتخاب و کپی هر بخش از متن |
+| ویرایش قوانین | فقط روی پیام‌های جدید اثر می‌کند | بازبینی همهٔ پیام‌های ذخیره‌شده (تصمیم دستی Not-Spam حفظ می‌شود)؛ قانون تکراری با راهنما رد می‌شود |
+| تردهای خالی | گاهی ترد خالی ساخته می‌شد | بدون ترد ساختگی؛ شرت‌کد با پیش‌شماره و بدون آن یکی حساب می‌شود |
+| تست | ۴۷ تست واحد | ۵۰ تست واحد |
 
 ## نصب
 
-اندروید ۸ به بالا. میسگا رو **برنامه پیش‌فرض پیامک** کن.
+اندروید ۸ به بالا لازم است. میسگا را **برنامهٔ پیش‌فرض پیامک** کنید.
 
 ## لایسنس
 
-مثل نسخه اصلی: GNU GPL نسخه ۳ ([LICENSE](LICENSE)). اثر اصلی از [mirarr-app/Misga](https://github.com/mirarr-app/Misga)؛ تغییرات فورک هم GPL-3 است.
+همان نسخهٔ اصلی: GNU GPL نسخهٔ ۳ ([LICENSE](LICENSE)). اثر اصلی از [mirarr-app/Misga](https://github.com/mirarr-app/Misga) است و تغییرات این فورک نیز GPL-3 است.
 
 </div>

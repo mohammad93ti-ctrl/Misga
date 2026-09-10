@@ -68,3 +68,9 @@ Thumbs.db
 /captures/
 
 /.kotlin/errors
+
+# Local dev artifacts (do not commit)
+/graphify-out/
+.freebuff/
+/Screenshot_*.jpg
+/sc*.jpg

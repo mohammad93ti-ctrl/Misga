@@ -59,18 +59,40 @@ class ConversationsViewModel(application: Application) : AndroidViewModel(applic
     val selectedThreadIds = mutableStateSetOf<Long>()
     var isSelectionMode by mutableStateOf(false)
         private set
+    private var recomputeJob: Job? = null
 
     init {
         registerSmsContentObserver()
         loadThreads()
         viewModelScope.launch {
-            dbHelper.rulesChanged.drop(1).collect { loadThreads(silent = true, force = true) }
+            dbHelper.rulesChanged.drop(1).collect { onFilterDataChanged() }
         }
         viewModelScope.launch {
-            dbHelper.prefsChanged.drop(1).collect { loadThreads(silent = true, force = true) }
+            dbHelper.prefsChanged.drop(1).collect { onFilterDataChanged() }
         }
         viewModelScope.launch {
             dbHelper.spamMetaChanged.drop(1).collect { loadThreads(silent = true, force = true) }
+        }
+    }
+
+    /**
+     * Rules or sender prefs changed: re-evaluate ALL stored messages so old
+     * verdicts (e.g. SPAM from before a new allowlist rule) are rewritten,
+     * then reload. Debounced and cancellable; the refresh itself emits
+     * spamMetaChanged which reloads every observer.
+     */
+    private fun onFilterDataChanged() {
+        recomputeJob?.cancel()
+        recomputeJob = viewModelScope.launch {
+            delay(RECOMPUTE_DEBOUNCE_MS)
+            try {
+                repository.recomputeSpamMeta()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("ConversationsViewModel", "Spam recompute failed", e)
+            }
+            loadThreads(silent = true, force = true)
         }
     }
 
@@ -332,11 +354,11 @@ class ConversationsViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun selectAllThreads() {
-        val visibleThreads = if (_uiState.value.showContactsOnly) {
-            _uiState.value.filteredThreads.filter { it.isContact }
-        } else {
-            _uiState.value.filteredThreads
-        }
+        selectAllThreads(_uiState.value.filteredThreads)
+    }
+
+    /** Select-all scoped to the currently visible list (inbox hides spam-last threads). */
+    fun selectAllThreads(visibleThreads: List<ConversationThread>) {
         val allFilteredIds = visibleThreads.map { it.threadId }
         val allSelected = selectedThreadIds.containsAll(allFilteredIds) && allFilteredIds.isNotEmpty()
         if (allSelected) {
@@ -405,6 +427,7 @@ class ConversationsViewModel(application: Application) : AndroidViewModel(applic
 }
 
 private const val SMS_OBSERVER_DEBOUNCE_MS = 400L
+private const val RECOMPUTE_DEBOUNCE_MS = 800L
 private const val SILENT_LOAD_MIN_INTERVAL_MS = 3_000L
 private const val SEARCH_MIN_QUERY_LENGTH = 2
 private const val SMS_PERMISSION_ERROR = "SMS permission required"

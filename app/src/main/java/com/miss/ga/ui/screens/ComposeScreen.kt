@@ -58,12 +58,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.miss.ga.ChatNav
 import com.miss.ga.R
+import com.miss.ga.data.model.SimOption
 import com.miss.ga.data.repository.ContactItem
 import com.miss.ga.data.repository.SmsRepository
 import com.miss.ga.theme.InputBarShape
 import com.miss.ga.theme.SquircleCardShape
 import com.miss.ga.ui.components.ConversationAvatar
+import com.miss.ga.ui.components.SimFieldIndicator
 import com.miss.ga.ui.components.SmsSegmentCounter
+import com.miss.ga.ui.components.nextSimId
 import com.miss.ga.ui.util.contentAware
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -88,6 +91,21 @@ fun ComposeScreen(
 
     var contactSuggestions by remember { mutableStateOf<List<ContactItem>>(emptyList()) }
     var isLoadingContacts by remember { mutableStateOf(false) }
+
+    // Dual-SIM send selector; hidden when fewer than 2 SIMs are visible.
+    var sims by remember { mutableStateOf<List<SimOption>>(emptyList()) }
+    var selectedSimId by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(Unit) {
+        val list = repository.availableSims()
+        sims = list
+        selectedSimId = list.firstOrNull()?.subscriptionId
+    }
+    LaunchedEffect(recipient) {
+        val last = repository.lastSimFor(recipient)
+        if (last != null && sims.any { it.subscriptionId == last }) {
+            selectedSimId = last
+        }
+    }
 
     // Search contacts on query update (debounced, including blank queries)
     LaunchedEffect(recipient) {
@@ -142,6 +160,13 @@ fun ComposeScreen(
                                     color = MaterialTheme.colorScheme.outline
                                 )
                             },
+                            trailingIcon = {
+                                SimFieldIndicator(
+                                    sims = sims,
+                                    selectedId = selectedSimId,
+                                    onCycle = { selectedSimId = nextSimId(sims, selectedSimId) }
+                                )
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(end = 8.dp),
@@ -161,7 +186,7 @@ fun ComposeScreen(
                                 if (recipient.isNotBlank() && messageBody.isNotBlank() && !isSending) {
                                     isSending = true
                                     coroutineScope.launch {
-                                        val result = repository.sendSms(recipient, messageBody)
+                                        val result = repository.sendSms(recipient, messageBody, selectedSimId)
                                         isSending = false
                                         if (!result.sent) {
                                             Toast.makeText(
@@ -170,6 +195,7 @@ fun ComposeScreen(
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         } else if (result.storedInProvider) {
+                                            selectedSimId?.let { repository.saveLastSimFor(recipient, it) }
                                             val threadId = repository.getOrCreateThreadId(recipient)
                                             onNavigateToChat(
                                                 ChatNav(
@@ -179,21 +205,14 @@ fun ComposeScreen(
                                                 )
                                             )
                                         } else {
+                                            // Sent over the radio but not stored (Misga is not the
+                                            // default SMS app): don't fabricate an empty thread,
+                                            // just tell the user and stay put.
                                             Toast.makeText(
                                                 context,
                                                 "Misga must be the default SMS app for sent messages to appear",
                                                 Toast.LENGTH_LONG
                                             ).show()
-                                            val threadId = repository.getOrCreateThreadId(recipient)
-                                            if (threadId > 0) {
-                                                onNavigateToChat(
-                                                    ChatNav(
-                                                        threadId = threadId,
-                                                        address = recipient,
-                                                        contactName = selectedContactName ?: repository.resolveContactName(recipient)
-                                                    )
-                                                )
-                                            }
                                         }
                                     }
                                 }

@@ -37,7 +37,9 @@ data class ChatUiState(
     val isSending: Boolean = false,
     val error: String? = null,
     val hasMoreOlder: Boolean = true,
-    val isLoadingOlder: Boolean = false
+    val isLoadingOlder: Boolean = false,
+    /** Thread holds only MMS/picture messages, which Misga cannot render yet. */
+    val hasMmsOnly: Boolean = false
 )
 
 class ChatViewModel(
@@ -114,9 +116,13 @@ class ChatViewModel(
                     limit = MESSAGE_PAGE_SIZE
                 )
                 if (!hadMessages) {
+                    // Empty SMS list: distinguish a truly empty thread from one
+                    // holding only MMS (picture/group) messages we can't render.
+                    val mmsOnly = page.isEmpty() && repository.hasMmsMessages(initialThreadId)
                     _uiState.value = _uiState.value.copy(
                         messages = page,
                         hasMoreOlder = page.size == MESSAGE_PAGE_SIZE,
+                        hasMmsOnly = mmsOnly,
                         error = null
                     )
                     if (initialMessageId != null) {
@@ -127,6 +133,7 @@ class ChatViewModel(
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
                         messages = mergeLatestPage(_uiState.value.messages, page),
+                        hasMmsOnly = false,
                         error = null
                     )
                 }
@@ -232,13 +239,14 @@ class ChatViewModel(
         }
     }
 
-    fun sendMessage(text: String, onComplete: (SendSmsResult) -> Unit = {}) {
+    fun sendMessage(text: String, subscriptionId: Int? = null, onComplete: (SendSmsResult) -> Unit = {}) {
         if (text.isBlank()) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSending = true)
-            val result = repository.sendSms(initialAddress, text)
+            val result = repository.sendSms(initialAddress, text, subscriptionId)
             _uiState.value = _uiState.value.copy(isSending = false)
             if (result.sent) {
+                if (subscriptionId != null) repository.saveLastSimFor(initialAddress, subscriptionId)
                 loadMessages()
             }
             onComplete(result)

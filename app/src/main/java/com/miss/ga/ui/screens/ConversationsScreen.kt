@@ -54,7 +54,11 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
@@ -68,10 +72,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -103,10 +109,15 @@ import com.miss.ga.ui.util.contentAware
 import com.miss.ga.ui.viewmodel.ConversationsViewModel
 import com.miss.ga.util.DefaultSmsAppHelper
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 private val ListBottomFabPadding = 88.dp
 private val AvatarDividerInset = 78.dp
 private val NoSelectionIds: Set<Long> = emptySet()
+// Load-progression jumps inside this window after first settle are not arrivals.
+private const val SPAM_CUE_WARMUP_MS = 15_000L
+
+private enum class SpamVisibility { ALL, HIDE, ONLY }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -140,13 +151,57 @@ fun ConversationsScreen(
     }
 
     var showBatchDeleteDialog by remember { mutableStateOf(false) }
+    // Inline spam filter: ALL shows everything (spam stays in place with its badge),
+    // HIDE collapses spam-last threads, ONLY shows just them (e.g. for bulk delete).
+    var spamFilter by remember { mutableStateOf(SpamVisibility.ALL) }
+
+    // In-app cue for newly filtered spam (system notification stays silent by design).
+    val snackbarState = remember { SnackbarHostState() }
+    val cueScope = rememberCoroutineScope()
+    var lastSeenSpamCount by remember { mutableStateOf<Int?>(null) }
+    // Moment the list first settled: count jumps before this are just the
+    // empty -> cached -> fresh load progression, not real arrivals.
+    var settledAtMs by remember { mutableStateOf(0L) }
 
     BackHandler(enabled = isSelectionMode) {
         viewModel.clearSelection()
     }
 
-    val currentlyVisibleThreads = remember(state.filteredThreads, state.showContactsOnly) {
-        if (state.showContactsOnly) state.filteredThreads.filter { it.isContact } else state.filteredThreads
+    val currentlyVisibleThreads = remember(state.filteredThreads, state.showContactsOnly, spamFilter) {
+        var base = if (state.showContactsOnly) state.filteredThreads.filter { it.isContact } else state.filteredThreads
+        base = when (spamFilter) {
+            SpamVisibility.HIDE -> base.filterNot { it.isLastReceivedSpam }
+            SpamVisibility.ONLY -> base.filter { it.isLastReceivedSpam }
+            SpamVisibility.ALL -> base
+        }
+        base
+    }
+    val spamThreadCount = remember(state.threads) {
+        state.threads.count { it.isLastReceivedSpam }
+    }
+    // Show a one-shot in-app note only for spam that arrives long after the
+    // list settled. Jumps during the warm-up window are load progression.
+    LaunchedEffect(spamThreadCount, state.isLoading) {
+        if (state.isLoading) return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        val last = lastSeenSpamCount
+        lastSeenSpamCount = spamThreadCount
+        if (last == null) {
+            settledAtMs = now
+            return@LaunchedEffect
+        }
+        if (now - settledAtMs < SPAM_CUE_WARMUP_MS) return@LaunchedEffect
+        if (spamThreadCount > last) {
+            cueScope.launch {
+                val result = snackbarState.showSnackbar(
+                    message = "New spam filtered",
+                    actionLabel = "View"
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    spamFilter = SpamVisibility.ONLY
+                }
+            }
+        }
     }
     val isDebuggable = remember(context) {
         (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -162,7 +217,7 @@ fun ConversationsScreen(
                 threads = state.threads,
                 isDebuggable = isDebuggable,
                 onClearSelection = { viewModel.clearSelection() },
-                onSelectAll = { viewModel.selectAllThreads() },
+                onSelectAll = { viewModel.selectAllThreads(currentlyVisibleThreads) },
                 onMarkSelectedRead = {
                     viewModel.markSelectedConversationsRead { count ->
                         Toast.makeText(
@@ -192,13 +247,12 @@ fun ConversationsScreen(
                 onNavigateToFilterStudio = onNavigateToFilterStudio
             )
         },
-        floatingActionButton = {
+                floatingActionButton = {
             AnimatedVisibility(
                 visible = !isSelectionMode,
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically()
-            ) {
-                ExtendedFloatingActionButton(
+            ) {                ExtendedFloatingActionButton(
                     onClick = onNavigateToCompose,
                     icon = { Icon(Icons.Default.Add, contentDescription = null) },
                     text = {
@@ -214,6 +268,7 @@ fun ConversationsScreen(
                 )
             }
         },
+        snackbarHost = { SnackbarHost(hostState = snackbarState) },
         modifier = modifier
     ) { innerPadding ->
         Column(
@@ -350,6 +405,32 @@ fun ConversationsScreen(
                     },
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+            }
+
+            // Inline spam visibility: hide spam-last threads or show only them.
+            if (spamThreadCount > 0 && !isSelectionMode && state.searchQuery.isBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = spamFilter == SpamVisibility.ALL,
+                        onClick = { spamFilter = SpamVisibility.ALL },
+                        label = { Text("All") }
+                    )
+                    FilterChip(
+                        selected = spamFilter == SpamVisibility.HIDE,
+                        onClick = { spamFilter = SpamVisibility.HIDE },
+                        label = { Text("Hide spam") }
+                    )
+                    FilterChip(
+                        selected = spamFilter == SpamVisibility.ONLY,
+                        onClick = { spamFilter = SpamVisibility.ONLY },
+                        label = { Text("Spam only ($spamThreadCount)") }
+                    )
+                }
             }
 
             val isSearchActive = state.searchQuery.isNotBlank()

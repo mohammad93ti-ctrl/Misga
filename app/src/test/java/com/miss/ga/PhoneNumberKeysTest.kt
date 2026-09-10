@@ -44,4 +44,21 @@ class PhoneNumberKeysTest {
         assertEquals("10001234", PhoneNumberKeys.canonical("1000-1234"))
         assertEquals("Snapp", PhoneNumberKeys.canonical(" Snapp "))
     }
+
+    @Test
+    fun shortcodeWithAndWithoutCountryPrefixShareIdentity() {
+        assertEquals("100065", PhoneNumberKeys.canonical("100065"))
+        assertEquals("100065", PhoneNumberKeys.canonical("+98100065"))
+        assertEquals("100065", PhoneNumberKeys.canonical("0100065"))
+
+        val bare = PhoneNumberKeys.keys("100065")
+        val prefixed = PhoneNumberKeys.keys("+98100065")
+        assertTrue(bare.intersect(prefixed).isNotEmpty())
+    }
+
+    @Test
+    fun landlineWithAndWithoutCountryPrefixShareIdentity() {
+        assertEquals("2112345678", PhoneNumberKeys.canonical("02112345678"))
+        assertEquals("2112345678", PhoneNumberKeys.canonical("+982112345678"))
+    }
 }

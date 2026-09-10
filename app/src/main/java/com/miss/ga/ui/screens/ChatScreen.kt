@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -80,14 +81,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.miss.ga.ChatNav
+import com.miss.ga.data.model.SimOption
 import com.miss.ga.data.model.SmsMessage
+import com.miss.ga.data.repository.SmsRepository
 import com.miss.ga.theme.InputBarShape
 import com.miss.ga.theme.PillShape
 import com.miss.ga.theme.SquircleCardShape
 import com.miss.ga.ui.components.ConversationAvatar
 import com.miss.ga.ui.components.MessageBubble
+import com.miss.ga.ui.components.SimFieldIndicator
 import com.miss.ga.ui.components.SmsSegmentCounter
 import com.miss.ga.ui.components.SpamMessagePill
+import com.miss.ga.ui.components.nextSimId
 import com.miss.ga.ui.util.senderDisplayName
 import com.miss.ga.ui.util.contentAware
 import com.miss.ga.ui.viewmodel.ChatViewModel
@@ -128,6 +133,17 @@ fun ChatScreen(
     var inputText by remember { mutableStateOf("") }
     var showSettingsSheet by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    // Dual-SIM send selector: loads once per conversation; hidden on single-SIM.
+    val simRepository = remember(context) { SmsRepository(context) }
+    var sims by remember { mutableStateOf<List<SimOption>>(emptyList()) }
+    var selectedSimId by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(nav.address) {
+        val list = simRepository.availableSims()
+        sims = list
+        selectedSimId = simRepository.lastSimFor(nav.address)
+            ?: list.firstOrNull()?.subscriptionId
+    }
 
     var selectedMessageForDialog by remember { mutableStateOf<SmsMessage?>(null) }
     var hasInitiallyScrolled by remember(nav.threadId, nav.address, nav.initialMessageId) { mutableStateOf(false) }
@@ -323,6 +339,13 @@ fun ChatScreen(
                                     color = MaterialTheme.colorScheme.outline
                                 )
                             },
+                            trailingIcon = {
+                                SimFieldIndicator(
+                                    sims = sims,
+                                    selectedId = selectedSimId,
+                                    onCycle = { selectedSimId = nextSimId(sims, selectedSimId) }
+                                )
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(end = 8.dp),
@@ -342,7 +365,7 @@ fun ChatScreen(
                                 if (inputText.isNotBlank() && !state.isSending) {
                                     val text = inputText
                                     inputText = ""
-                                    viewModel.sendMessage(text) { result ->
+                                    viewModel.sendMessage(text, selectedSimId) { result ->
                                         if (!result.sent) {
                                             inputText = text
                                             Toast.makeText(context, "Couldn't send message. Check signal and default SMS app.", Toast.LENGTH_SHORT).show()
@@ -419,13 +442,14 @@ fun ChatScreen(
                         }
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "No messages yet",
+                            text = if (state.hasMmsOnly) "Picture messages live here" else "No messages yet",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Send an SMS to start the conversation",
+                            text = if (state.hasMmsOnly) "This conversation holds MMS messages, which Misga can't display yet — nothing is lost"
+                            else "Send an SMS to start the conversation",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline
                         )
@@ -434,6 +458,7 @@ fun ChatScreen(
             } else {
                 ChatMessageList(
                     messages = state.messages,
+                    sims = sims,
                     listState = listState,
                     highlightedMessageId = highlightedMessageId,
                     isLoadingOlder = state.isLoadingOlder,
@@ -521,12 +546,15 @@ fun ChatScreen(
                         shape = MaterialTheme.shapes.medium,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = msg.body,
-                            style = MaterialTheme.typography.bodyMedium.contentAware(),
-                            maxLines = 4,
-                            modifier = Modifier.padding(12.dp)
-                        )
+                        // Selectable preview: long-press here to select and copy any part.
+                        SelectionContainer {
+                            Text(
+                                text = msg.body,
+                                style = MaterialTheme.typography.bodyMedium.contentAware(),
+                                maxLines = 4,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
                     }
                 }
             },
@@ -564,6 +592,7 @@ fun ChatScreen(
 @Composable
 private fun ChatMessageList(
     messages: List<SmsMessage>,
+    sims: List<SimOption>,
     listState: LazyListState,
     highlightedMessageId: Long?,
     isLoadingOlder: Boolean,
@@ -592,10 +621,12 @@ private fun ChatMessageList(
         ) { index ->
             val message = messages[messages.lastIndex - index]
             val isHighlighted = message.id == highlightedMessageId
+            val simLabel = simLabelFor(message, sims)
             if (message.isSpam) {
                 SpamMessagePill(
                     message = message,
                     isHighlighted = isHighlighted,
+                    simLabel = simLabel,
                     onRevealToggle = { revealed -> onRevealToggle(message.id, revealed) },
                     onMarkNotSpam = { onMarkNotSpam(message.id) },
                     onDelete = { onDelete(message.id) }
@@ -604,6 +635,7 @@ private fun ChatMessageList(
                 MessageBubble(
                     message = message,
                     isHighlighted = isHighlighted,
+                    simLabel = simLabel,
                     onLongClick = { onLongClick(message) }
                 )
             }
@@ -627,8 +659,16 @@ private fun ChatMessageList(
     }
 }
 
-private fun isCallable(address: String): Boolean {
-    if (address.isBlank()) return false
+/** Tiny "from/via SIM N" caption; null when the SIM is unknown or single-SIM. */
+private fun simLabelFor(message: SmsMessage, sims: List<SimOption>): String? {
+    if (sims.size < 2) return null
+    val subId = message.subscriptionId ?: return null
+    val sim = sims.find { it.subscriptionId == subId } ?: return null
+    val name = "SIM ${sim.slotIndex + 1}"
+    return if (message.isSent) "via $name" else "from $name"
+}
+
+private fun isCallable(address: String): Boolean {    if (address.isBlank()) return false
     val digits = address.filter { it.isDigit() }
     val letters = address.filter { it.isLetter() }
     // If it is an alphanumeric sender id (like "BankMellat", "Snapp", "Digikala") where letters exist and digits are fewer than 3, it is not a phone number

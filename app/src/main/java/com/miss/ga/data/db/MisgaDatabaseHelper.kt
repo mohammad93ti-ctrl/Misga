@@ -48,6 +48,7 @@ class MisgaDatabaseHelper private constructor(context: Context) :
                 category TEXT NOT NULL DEFAULT 'CUSTOM',
                 sender_target TEXT,
                 description TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             )
             """.trimIndent()
@@ -140,6 +141,21 @@ class MisgaDatabaseHelper private constructor(context: Context) :
                 )
             } catch (e: Exception) {}
         }
+        if (oldVersion < 4) {
+            try { db.execSQL("ALTER TABLE filter_rules ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0") } catch (e: Exception) {}
+            // Backfill: keep today's evaluation order (newest custom rule first).
+            try {
+                var rank = 0
+                db.query("filter_rules", arrayOf("id"), null, null, null, null, "created_at DESC").use { cursor ->
+                    val idIdx = cursor.getColumnIndexOrThrow("id")
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getLong(idIdx)
+                        db.execSQL("UPDATE filter_rules SET sort_order = $rank WHERE id = $id")
+                        rank++
+                    }
+                }
+            } catch (e: Exception) {}
+        }
     }
 
     // --- Filter Rules Operations ---
@@ -219,12 +235,12 @@ class MisgaDatabaseHelper private constructor(context: Context) :
             }
         }
 
-        // 2. Get custom user rules
+        // 2. Get custom user rules in user-defined evaluation order.
         val userCursor = db.query(
             "filter_rules",
             null,
             null, null, null, null,
-            "created_at DESC"
+            "sort_order ASC, created_at DESC"
         )
         userCursor.use {
             val indices = FilterRuleIndices(it)
@@ -247,7 +263,7 @@ class MisgaDatabaseHelper private constructor(context: Context) :
             "sender_target IN ($placeholders)",
             variants,
             null, null,
-            "created_at DESC"
+            "sort_order ASC, created_at DESC"
         )
         cursor.use {
             val indices = FilterRuleIndices(it)
@@ -259,9 +275,18 @@ class MisgaDatabaseHelper private constructor(context: Context) :
     }
 
     suspend fun insertCustomRule(rule: FilterRule): Long = withContext(Dispatchers.IO) {
+        // New rules go on top (lowest sort_order), matching the previous newest-first order.
+        val topOrder = try {
+            readableDatabase.query("filter_rules", arrayOf("MIN(sort_order)"), null, null, null, null, null).use {
+                if (it.moveToFirst() && !it.isNull(0)) it.getInt(0) - 1 else 0
+            }
+        } catch (e: Exception) {
+            0
+        }
+        // Trimmed: a trailing space in a pattern silently never matches.
         val cv = ContentValues().apply {
             put("name", rule.name)
-            put("pattern", rule.pattern)
+            put("pattern", rule.pattern.trim())
             put("is_regex", if (rule.isRegex) 1 else 0)
             put("action", rule.action.name)
             put("list_type", rule.listType.name)
@@ -270,6 +295,7 @@ class MisgaDatabaseHelper private constructor(context: Context) :
             put("category", rule.category.name)
             put("sender_target", rule.senderTarget?.let { normalizeAddress(it) })
             put("description", rule.description)
+            put("sort_order", topOrder)
             put("created_at", System.currentTimeMillis())
         }
         val id = writableDatabase.insert("filter_rules", null, cv)
@@ -337,6 +363,47 @@ class MisgaDatabaseHelper private constructor(context: Context) :
             _rulesChanged.value = System.currentTimeMillis()
             rows > 0
         }
+    }
+
+    /**
+     * Moves a custom rule one step up/down within its own list (allow/block),
+     * swapping sort_order with the adjacent rule. Evaluation follows this order,
+     * so the first matching rule in the same tier wins.
+     */
+    suspend fun moveCustomRule(ruleId: Long, up: Boolean): Boolean = withContext(Dispatchers.IO) {
+        if (ruleId < 0) return@withContext false
+        val db = writableDatabase
+        val current = db.query(
+            "filter_rules", arrayOf("sort_order", "list_type"), "id = ?",
+            arrayOf(ruleId.toString()), null, null, null
+        ).use {
+            if (!it.moveToFirst()) return@withContext false
+            Pair(it.getInt(0), it.getString(1) ?: "BLOCKLIST")
+        }
+        val (order, listType) = current
+        val neighbor = db.query(
+            "filter_rules", arrayOf("id", "sort_order"),
+            "list_type = ? AND id <> ? AND " + if (up) "sort_order < ?" else "sort_order > ?",
+            arrayOf(listType, ruleId.toString(), order.toString()),
+            null, null,
+            if (up) "sort_order DESC" else "sort_order ASC",
+            "1"
+        ).use {
+            if (!it.moveToFirst()) return@withContext false
+            Pair(it.getLong(0), it.getInt(1))
+        }
+        db.beginTransaction()
+        try {
+            val me = ContentValues().apply { put("sort_order", neighbor.second) }
+            db.update("filter_rules", me, "id = ?", arrayOf(ruleId.toString()))
+            val other = ContentValues().apply { put("sort_order", order) }
+            db.update("filter_rules", other, "id = ?", arrayOf(neighbor.first.toString()))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        _rulesChanged.value = System.currentTimeMillis()
+        true
     }
 
     suspend fun setRuleEnabled(ruleId: Long, isEnabled: Boolean, isPredefined: Boolean) = withContext(Dispatchers.IO) {
@@ -484,6 +551,47 @@ class MisgaDatabaseHelper private constructor(context: Context) :
         _spamMetaChanged.value = System.currentTimeMillis()
     }
 
+    /**
+     * Bulk verdict refresh (e.g. after a rule change): rewrites action/matched-rule
+     * for the given messages but NEVER touches the user's own flags — a manually
+     * revealed or unmarked message keeps its is_revealed state. Emits
+     * [spamMetaChanged] only when at least one row actually changed.
+     */
+    suspend fun refreshSpamVerdicts(entries: List<SpamMetaWrite>) = withContext(Dispatchers.IO) {
+        if (entries.isEmpty()) return@withContext
+        val db = writableDatabase
+        var changed = 0
+        db.beginTransaction()
+        try {
+            for (entry in entries) {
+                val update = ContentValues().apply {
+                    put("address", normalizeAddress(entry.address))
+                    put("matched_rule_name", entry.matchedRuleName)
+                    put("is_spam", if (entry.action == FilterAction.SPAM) 1 else 0)
+                    put("action", entry.action.name)
+                }
+                val rows = db.update(
+                    "spam_message_meta", update, "message_id = ?",
+                    arrayOf(entry.messageId.toString())
+                )
+                if (rows == 0) {
+                    update.put("message_id", entry.messageId)
+                    update.put("is_revealed", 0)
+                    update.put("created_at", System.currentTimeMillis())
+                    db.insertWithOnConflict(
+                        "spam_message_meta", null, update,
+                        SQLiteDatabase.CONFLICT_REPLACE
+                    )
+                }
+                changed++
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        if (changed > 0) _spamMetaChanged.value = System.currentTimeMillis()
+    }
+
     suspend fun getSpamMetaMapForThread(address: String): Map<Long, SpamMessageMeta> =
         withContext(Dispatchers.IO) {
             val result = mutableMapOf<Long, SpamMessageMeta>()
@@ -627,14 +735,18 @@ class MisgaDatabaseHelper private constructor(context: Context) :
                 } else {
                     FilterAction.NORMAL
                 }
+                val snippet = it.getString(snippetIdx) ?: ""
+                val messageCount = it.getInt(countIdx)
+                // Skip phantom rows (no messages and no snippet) like the live list does.
+                if (messageCount <= 0 && snippet.isBlank()) continue
                 threads.add(
                     ConversationThread(
                         threadId = it.getLong(idIdx),
                         address = it.getString(addrIdx) ?: "",
                         contactName = contactName?.ifBlank { null },
-                        snippet = it.getString(snippetIdx) ?: "",
+                        snippet = snippet,
                         date = it.getLong(dateIdx),
-                        messageCount = it.getInt(countIdx),
+                        messageCount = messageCount,
                         unreadCount = it.getInt(unreadIdx),
                         hasSpam = it.getInt(hasSpamIdx) == 1,
                         isUnreadSpam = it.getInt(spamIdx) == 1,
@@ -901,7 +1013,7 @@ class MisgaDatabaseHelper private constructor(context: Context) :
 
     companion object {
         private const val DATABASE_NAME = "misga_filters.db"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
         private const val SQLITE_IN_CHUNK_SIZE = 500
 
         @Volatile

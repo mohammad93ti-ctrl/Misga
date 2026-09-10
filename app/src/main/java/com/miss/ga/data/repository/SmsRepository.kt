@@ -1,11 +1,13 @@
 package com.miss.ga.data.repository
 
+import android.Manifest
 import android.app.PendingIntent
 import android.app.role.RoleManager
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.ContactsContract
@@ -13,12 +15,14 @@ import android.provider.Telephony
 import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.miss.ga.data.db.MisgaDatabaseHelper
 import com.miss.ga.data.db.SpamMetaWrite
 import com.miss.ga.data.model.ConversationThread
 import com.miss.ga.data.model.FilterAction
 import com.miss.ga.data.model.SearchMessageResult
 import com.miss.ga.data.model.SenderPreference
+import com.miss.ga.data.model.SimOption
 import com.miss.ga.data.model.SmsMessage
 import com.miss.ga.data.util.PhoneNumberKeys
 import com.miss.ga.engine.FilterRulesCache
@@ -72,9 +76,17 @@ class SmsRepository(private val context: Context) {
     }
 
     private fun smsManager(): SmsManager {
+        return smsManagerFor(null)
+    }
+
+    private fun smsManagerFor(subscriptionId: Int?): SmsManager {
         val defaultManager = context.getSystemService(SmsManager::class.java)
             ?: SmsManager.getDefault()
-        val subId = defaultSmsSubscriptionId()
+        val subId = if (subscriptionId != null && subscriptionId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+            subscriptionId
+        } else {
+            defaultSmsSubscriptionId()
+        }
         if (subId == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
             return defaultManager
         }
@@ -84,6 +96,46 @@ class SmsRepository(private val context: Context) {
             @Suppress("DEPRECATION")
             SmsManager.getSmsManagerForSubscriptionId(subId)
         }
+    }
+
+    /** SIMs available for the send selector. Empty = single-SIM mode (no permission or one SIM). */
+    fun availableSims(): List<SimOption> {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            return emptyList()
+        }
+        return try {
+            val sm = context.getSystemService(SubscriptionManager::class.java) ?: return emptyList()
+            val infos = sm.activeSubscriptionInfoList ?: return emptyList()
+            infos.mapNotNull { info ->
+                val subId = info.subscriptionId
+                if (subId == SubscriptionManager.INVALID_SUBSCRIPTION_ID) return@mapNotNull null
+                SimOption(
+                    subscriptionId = subId,
+                    slotIndex = info.simSlotIndex.coerceAtLeast(0),
+                    displayName = info.displayName?.toString()?.takeIf { it.isNotBlank() }
+                        ?: "SIM ${info.simSlotIndex + 1}",
+                    carrierName = info.carrierName?.toString()
+                )
+            }.sortedBy { it.slotIndex }.distinctBy { it.subscriptionId }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "READ_PHONE_STATE denied, hiding SIM selector", e)
+            emptyList()
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not list SIMs", e)
+            emptyList()
+        }
+    }
+
+    private fun simPrefs() = context.getSharedPreferences("sim_prefs", Context.MODE_PRIVATE)
+
+    fun lastSimFor(address: String): Int? {
+        val key = "sim_" + dbHelper.normalizeAddress(address)
+        val id = simPrefs().getInt(key, SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+        return if (id == SubscriptionManager.INVALID_SUBSCRIPTION_ID) null else id
+    }
+
+    fun saveLastSimFor(address: String, subscriptionId: Int) {
+        simPrefs().edit().putInt("sim_" + dbHelper.normalizeAddress(address), subscriptionId).apply()
     }
 
     suspend fun getCachedThreads(): List<ConversationThread> =
@@ -277,6 +329,13 @@ class SmsRepository(private val context: Context) {
                     continue
                 }
 
+                // Phantom thread: provider row with no messages and no snippet
+                // (leftover of a failed store, a search-created row, or a cleaned
+                // conversation). It opens to an empty chat, so don't list it.
+                if (row.messageCount <= 0 && row.snippet.isBlank()) {
+                    continue
+                }
+
                 threads.add(
                     ConversationThread(
                         threadId = threadId,
@@ -324,7 +383,8 @@ class SmsRepository(private val context: Context) {
             Telephony.Sms.DATE,
             Telephony.Sms.TYPE,
             Telephony.Sms.READ,
-            Telephony.Sms.STATUS
+            Telephony.Sms.STATUS,
+            Telephony.Sms.SUBSCRIPTION_ID
         )
 
         val selection: String
@@ -361,6 +421,7 @@ class SmsRepository(private val context: Context) {
                 val typeIdx = it.getColumnIndexOrThrow(Telephony.Sms.TYPE)
                 val readIdx = it.getColumnIndexOrThrow(Telephony.Sms.READ)
                 val statusIdx = it.getColumnIndexOrThrow(Telephony.Sms.STATUS)
+                val subIdIdx = it.getColumnIndex(Telephony.Sms.SUBSCRIPTION_ID)
 
                 while (it.moveToNext() && messages.size < limit) {
                     val msgId = it.getLong(idIdx)
@@ -371,6 +432,9 @@ class SmsRepository(private val context: Context) {
                     val type = it.getInt(typeIdx)
                     val read = it.getInt(readIdx) == 1
                     val status = it.getInt(statusIdx)
+                    val subId = if (subIdIdx >= 0 && !it.isNull(subIdIdx)) {
+                        it.getInt(subIdIdx).takeIf { id -> id != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
+                    } else null
 
                     if (IncomingSmsPolicy.isGhostConversation(addr, body)) {
                         continue
@@ -420,7 +484,8 @@ class SmsRepository(private val context: Context) {
                             isSpam = isSpam,
                             matchedRuleName = matchedRule,
                             isRevealed = isRevealed,
-                            status = status
+                            status = status,
+                            subscriptionId = subId
                         )
                     )
                 }
@@ -437,12 +502,15 @@ class SmsRepository(private val context: Context) {
         messages
     }
 
-    suspend fun sendSms(address: String, body: String): SendSmsResult = withContext(Dispatchers.IO) {
+    suspend fun sendSms(address: String, body: String): SendSmsResult =
+        sendSms(address, body, subscriptionId = null)
+
+    suspend fun sendSms(address: String, body: String, subscriptionId: Int?): SendSmsResult = withContext(Dispatchers.IO) {
         if (address.isBlank() || body.isBlank()) {
             return@withContext SendSmsResult(sent = false, storedInProvider = false)
         }
 
-        val smsManager = smsManager()
+        val smsManager = smsManagerFor(subscriptionId)
         val parts = try {
             smsManager.divideMessage(body)
         } catch (e: Exception) {
@@ -460,7 +528,11 @@ class SmsRepository(private val context: Context) {
                 put(Telephony.Sms.READ, 1)
                 put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
                 put(Telephony.Sms.STATUS, Telephony.Sms.STATUS_PENDING)
-                putDefaultSmsSubscription(this)
+                if (subscriptionId != null && subscriptionId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                    put(Telephony.Sms.SUBSCRIPTION_ID, subscriptionId)
+                } else {
+                    putDefaultSmsSubscription(this)
+                }
             }
             val uri = context.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, cv)
             messageId = uri?.lastPathSegment?.toLongOrNull() ?: -1L
@@ -601,6 +673,100 @@ class SmsRepository(private val context: Context) {
 
     suspend fun markMessageNotSpam(messageId: Long) = withContext(Dispatchers.IO) {
         dbHelper.unmarkSpam(messageId)
+    }
+
+    /**
+     * True when this thread holds MMS (picture/group) messages, which Misga does
+     * not render — explains an otherwise "empty" conversation instead of a ghost.
+     */
+    suspend fun hasMmsMessages(threadId: Long): Boolean = withContext(Dispatchers.IO) {
+        if (threadId <= 0) return@withContext false
+        try {
+            context.contentResolver.query(
+                Telephony.Mms.CONTENT_URI,
+                arrayOf(Telephony.Mms._ID),
+                "${Telephony.Mms.THREAD_ID} = ?",
+                arrayOf(threadId.toString()),
+                null
+            )?.use { it.moveToFirst() } ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not check MMS for thread $threadId", e)
+            false
+        }
+    }
+
+    /**
+     * Re-evaluates every stored inbox message against the CURRENT rules and rewrites
+     * stale verdicts (e.g. a message marked SPAM before an allowlist rule existed).
+     * A message the user manually cleared always keeps the user's verdict.
+     * @return number of verdicts rewritten.
+     */
+    suspend fun recomputeSpamMeta(): Int = withContext(Dispatchers.IO) {
+        val cache = FilterRulesCache.getInstance(dbHelper)
+        // Rebuild from DB deterministically: the dirty-flag collectors run
+        // asynchronously and may not have seen a just-saved rule yet.
+        cache.invalidate()
+        val prepared = try {
+            cache.preparedRules()
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not load rules for recompute", e)
+            return@withContext 0
+        }
+        val senderPrefs = try {
+            cache.senderPreferences()
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not load sender prefs for recompute", e)
+            return@withContext 0
+        }
+        val stored = try {
+            dbHelper.getAllSpamMetaMap()
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not load spam meta for recompute", e)
+            return@withContext 0
+        }
+        val updates = mutableListOf<SpamMetaWrite>()
+        try {
+            val cursor = context.contentResolver.query(
+                Telephony.Sms.Inbox.CONTENT_URI,
+                arrayOf(Telephony.Sms._ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY),
+                null, null,
+                "${Telephony.Sms.DATE} ASC"
+            )
+            cursor?.use {
+                val idIdx = it.getColumnIndexOrThrow(Telephony.Sms._ID)
+                val addrIdx = it.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
+                val bodyIdx = it.getColumnIndexOrThrow(Telephony.Sms.BODY)
+                while (it.moveToNext()) {
+                    val msgId = it.getLong(idIdx)
+                    val addr = it.getString(addrIdx) ?: continue
+                    val body = it.getString(bodyIdx) ?: ""
+                    if (IncomingSmsPolicy.isGhostConversation(addr, body)) continue
+                    val existing = stored[msgId]
+                    val pref = senderPrefs[dbHelper.normalizeAddress(addr)]
+                    val eval = SmsFilterEngine.evaluateMessage(addr, body, prepared, pref)
+                    if (existing != null &&
+                        existing.action == eval.action &&
+                        existing.matchedRuleName == eval.matchedRuleName
+                    ) continue
+                    // User manually cleared it: their decision wins over a re-spam.
+                    if (existing != null && !existing.isSpam && existing.isRevealed && eval.action == FilterAction.SPAM) continue
+                    if (existing == null && eval.action == FilterAction.NORMAL) continue
+                    updates.add(SpamMetaWrite(msgId, addr, eval.matchedRuleName, eval.action))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error scanning inbox for recompute", e)
+            return@withContext 0
+        }
+        if (updates.isNotEmpty()) {
+            try {
+                dbHelper.refreshSpamVerdicts(updates)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error writing recomputed verdicts", e)
+                return@withContext 0
+            }
+        }
+        updates.size
     }
 
     private fun loadCanonicalAddressMap(): Map<String, String> {
@@ -810,14 +976,14 @@ class SmsRepository(private val context: Context) {
                 val typeIdx = it.getColumnIndexOrThrow(Telephony.Sms.TYPE)
 
                 while (it.moveToNext() && hits.size < SEARCH_RESULT_LIMIT) {
-                    var threadId = it.getLong(threadIdIdx)
+                    val threadId = it.getLong(threadIdIdx)
+                    // Search only what exists: never create threads from a read path.
+                    // A provider row without a thread is not an openable conversation.
+                    if (threadId <= 0) continue
                     val address = it.getString(addrIdx) ?: ""
                     val body = it.getString(bodyIdx) ?: ""
                     if (IncomingSmsPolicy.isGhostConversation(address, body)) {
                         continue
-                    }
-                    if (threadId <= 0 && address.isNotBlank()) {
-                        threadId = Telephony.Threads.getOrCreateThreadId(context, address)
                     }
                     hits.add(
                         SearchHit(

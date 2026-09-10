@@ -79,6 +79,16 @@ class FilterRulesCache private constructor(private val dbHelper: MisgaDatabaseHe
         return null
     }
 
+    /**
+     * Forces the next [preparedRules]/[senderPreferences] call to rebuild from the
+     * database instead of trusting the cached flag (which is set asynchronously by
+     * collectors and can lag behind a just-saved rule).
+     */
+    fun invalidate() {
+        rulesDirty = true
+        prefsDirty = true
+    }
+
     companion object {
         private val caches = IdentityHashMap<MisgaDatabaseHelper, FilterRulesCache>()
 

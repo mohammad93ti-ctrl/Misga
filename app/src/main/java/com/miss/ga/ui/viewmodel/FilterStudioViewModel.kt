@@ -127,9 +127,25 @@ class FilterStudioViewModel(application: Application) : AndroidViewModel(applica
         action: FilterAction = _uiState.value.simulatedAction
     ) {
         viewModelScope.launch {
+            val pattern = _uiState.value.testPattern.trim()
+            if (pattern.isBlank()) {
+                _uiState.value = _uiState.value.copy(toastMessage = "Pattern cannot be empty")
+                return@launch
+            }
+            // Same pattern + type already exists: point at it instead of duplicating.
+            val duplicate = dbHelper.getAllRules().any {
+                it.pattern.trim() == pattern && it.listType == listType &&
+                    it.isRegex == _uiState.value.isRegex && it.senderTarget == null
+            }
+            if (duplicate) {
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = "This rule already exists — no duplicate saved."
+                )
+                return@launch
+            }
             val rule = FilterRule(
                 name = name.ifBlank { if (listType == RuleListType.ALLOWLIST) "Custom Allowlist Filter" else "Custom Blocklist Filter" },
-                pattern = _uiState.value.testPattern,
+                pattern = pattern,
                 isRegex = _uiState.value.isRegex,
                 action = if (listType == RuleListType.ALLOWLIST) FilterAction.NORMAL else action,
                 listType = listType,
@@ -141,7 +157,8 @@ class FilterStudioViewModel(application: Application) : AndroidViewModel(applica
             dbHelper.insertCustomRule(rule)
             loadRules()
             _uiState.value = _uiState.value.copy(
-                toastMessage = "${if (listType == RuleListType.ALLOWLIST) "Allowlist" else "Filter"} rule saved successfully!"
+                toastMessage = if (listType == RuleListType.ALLOWLIST) "Allowlist rule saved successfully!"
+                else "Blocklist rule saved successfully!"
             )
         }
     }

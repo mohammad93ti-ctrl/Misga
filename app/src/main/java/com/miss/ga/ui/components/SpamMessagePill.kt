@@ -10,6 +10,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -67,7 +68,8 @@ fun SpamMessagePill(
     onMarkNotSpam: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
-    isHighlighted: Boolean = false
+    isHighlighted: Boolean = false,
+    simLabel: String? = null
 ) {
     val isDark = isSystemInDarkTheme()
     val bgColor = if (isDark) SpamWarningDark else SpamWarningLight
@@ -134,7 +136,7 @@ fun SpamMessagePill(
                                 modifier = Modifier.padding(top = 2.dp)
                             ) {
                                 Text(
-                                    text = "Rule: $ruleName",
+                                    text = "Rule: $ruleName" + (simLabel?.let { " · $it" } ?: ""),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = textColor,
                                     fontSize = 10.5.sp,
@@ -195,13 +197,15 @@ fun SpamMessagePill(
                         border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            text = message.body,
-                            style = MaterialTheme.typography.bodyMedium.contentAware(),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            lineHeight = 21.sp,
-                            modifier = Modifier.padding(12.dp)
-                        )
+                        SelectionContainer {
+                            Text(
+                                text = message.body,
+                                style = MaterialTheme.typography.bodyMedium.contentAware(),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                lineHeight = 21.sp,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))

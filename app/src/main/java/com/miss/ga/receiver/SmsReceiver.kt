@@ -57,7 +57,7 @@ class SmsReceiver : BroadcastReceiver() {
                 ) {
                     return@launch
                 }
-                processIncomingMessages(context, messages, action == Telephony.Sms.Intents.SMS_DELIVER_ACTION)
+                processIncomingMessages(context, messages, action == Telephony.Sms.Intents.SMS_DELIVER_ACTION, intentSubscriptionId(intent))
             } catch (e: Exception) {
                 Log.e(TAG, "Error processing SMS", e)
             } finally {
@@ -70,7 +70,8 @@ class SmsReceiver : BroadcastReceiver() {
     private suspend fun processIncomingMessages(
         context: Context,
         messages: Array<AndroidSmsMessage>,
-        isDefaultAppDeliver: Boolean
+        isDefaultAppDeliver: Boolean,
+        intentSubId: Int
     ) {
         val dbHelper = MisgaDatabaseHelper.getInstance(context)
         val filterEngine = SmsFilterEngine(dbHelper)
@@ -102,7 +103,8 @@ class SmsReceiver : BroadcastReceiver() {
                     Log.w(TAG, "messageBody failed", e)
                     null
                 },
-                timestampMillis = message.timestampMillis
+                timestampMillis = message.timestampMillis,
+                subscriptionId = intentSubId
             )
         }
         val pendingMetaWrites = mutableListOf<SpamMetaWrite>()
@@ -135,13 +137,23 @@ class SmsReceiver : BroadcastReceiver() {
 
             // If we are the default SMS app and received SMS_DELIVER, we must insert into Telephony provider
             if (isDefaultAppDeliver) {
+                // Prefer the SIM that actually received this message; fall back to default.
+                val receivedSubId = entry.subscriptionId.takeIf {
+                    it != android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID
+                } ?: intentSubId.takeIf {
+                    it != android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID
+                }
                 val cv = ContentValues().apply {
                     put(Telephony.Sms.ADDRESS, sender)
                     put(Telephony.Sms.BODY, fullBody)
                     put(Telephony.Sms.DATE, timestamp)
                     put(Telephony.Sms.READ, if (filterResult.action == FilterAction.SPAM) 1 else 0)
                     put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_INBOX)
-                    smsRepository.putDefaultSmsSubscription(this)
+                    if (receivedSubId != null) {
+                        put(Telephony.Sms.SUBSCRIPTION_ID, receivedSubId)
+                    } else {
+                        smsRepository.putDefaultSmsSubscription(this)
+                    }
                 }
 
                 try {
@@ -307,5 +319,24 @@ class SmsReceiver : BroadcastReceiver() {
         private const val INBOX_LOOKUP_ATTEMPTS = 4
         private const val INBOX_LOOKUP_DELAY_MS = 400L
         private const val INBOX_LOOKUP_WINDOW_MS = 15_000L
+
+        /** Best-effort subId of the SIM that received this broadcast; INVALID when unknown. */
+        private fun intentSubscriptionId(intent: Intent): Int {
+            val extras = intent.extras ?: return android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID
+            // AOSP evergreen key + legacy "subscription" key used by several OEMs.
+            val keys = arrayOf(
+                "android.telephony.extra.SUBSCRIPTION_INDEX",
+                "subscription",
+                android.telephony.SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX
+            )
+            for (key in keys) {
+                if (!extras.containsKey(key)) continue
+                val id = try { extras.getInt(key, android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID) } catch (_: Exception) {
+                    android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID
+                }
+                if (id != android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID) return id
+            }
+            return android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID
+        }
     }
 }

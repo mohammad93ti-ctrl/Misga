@@ -1,7 +1,10 @@
 package com.miss.ga
 
 import com.miss.ga.data.model.FilterAction
+import com.miss.ga.data.model.FilterRule
 import com.miss.ga.data.model.PredefinedRules
+import com.miss.ga.data.model.RuleCategory
+import com.miss.ga.data.model.RuleListType
 import com.miss.ga.engine.SmsFilterEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -444,5 +447,29 @@ l.snpy.ir/iouvc"""
             result.action
         )
         assertTrue(result.isAllowlisted)
+    }
+
+    @Test
+    fun testDuplicateCustomRuleDoesNotChangeVerdict() {
+        val rule = FilterRule(
+            name = "Sefaresh keyword",
+            pattern = "سفارش",
+            isRegex = true,
+            action = FilterAction.SPAM,
+            listType = RuleListType.BLOCKLIST,
+            isEnabled = true,
+            isPredefined = false,
+            category = RuleCategory.CUSTOM
+        )
+        val body = "سفارش شما با موفقیت ثبت شد."
+        val single = SmsFilterEngine.evaluateMessage("09121234567", body, listOf(rule))
+        val doubled = SmsFilterEngine.evaluateMessage("09121234567", body, listOf(rule, rule.copy()))
+        assertEquals(FilterAction.SPAM, single.action)
+        assertEquals(
+            "An identical duplicate rule must not change the verdict",
+            single.action,
+            doubled.action
+        )
+        assertEquals(single.matchedRuleName, doubled.matchedRuleName)
     }
 }

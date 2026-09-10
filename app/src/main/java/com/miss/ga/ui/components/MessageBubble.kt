@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.miss.ga.data.model.SmsMessage
@@ -39,7 +40,8 @@ fun MessageBubble(
     message: SmsMessage,
     onLongClick: () -> Unit,
     modifier: Modifier = Modifier,
-    isHighlighted: Boolean = false
+    isHighlighted: Boolean = false,
+    simLabel: String? = null
 ) {
     val isSent = message.isSent
     val bubbleShape = if (isSent) OutgoingBubbleShape else IncomingBubbleShape
@@ -83,6 +85,8 @@ fun MessageBubble(
             Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
             ) {
+                // Plain text: long-press opens the message options dialog, where the
+                // preview is selectable for partial copy.
                 Text(
                     text = message.body,
                     style = MaterialTheme.typography.bodyLarge.contentAware(),
@@ -96,6 +100,18 @@ fun MessageBubble(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (simLabel != null) {
+                        Text(
+                            text = simLabel,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                textDirection = TextDirection.Ltr
+                            ),
+                            color = contentColor.copy(alpha = 0.55f),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
                     Text(
                         text = timeText,
                         style = MaterialTheme.typography.labelSmall,

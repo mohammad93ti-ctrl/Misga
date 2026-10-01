@@ -96,15 +96,20 @@ fun ComposeScreen(
     var sims by remember { mutableStateOf<List<SimOption>>(emptyList()) }
     var selectedSimId by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(Unit) {
-        val list = repository.availableSims()
-        sims = list
-        selectedSimId = list.firstOrNull()?.subscriptionId
+        sims = repository.availableSims()
+        selectedSimId = sims.firstOrNull()?.subscriptionId
     }
-    LaunchedEffect(recipient) {
-        val last = repository.lastSimFor(recipient)
-        if (last != null && sims.any { it.subscriptionId == last }) {
-            selectedSimId = last
+    LaunchedEffect(recipient, sims) {
+        if (sims.isEmpty()) return@LaunchedEffect
+        if (recipient.isBlank()) {
+            selectedSimId = sims.firstOrNull()?.subscriptionId
+            return@LaunchedEffect
         }
+        // Debounced: the recipient changes on every keystroke.
+        delay(250)
+        val resolved = repository.resolveReplySubscription(recipient)
+        selectedSimId = resolved?.takeIf { id -> sims.any { it.subscriptionId == id } }
+            ?: sims.firstOrNull()?.subscriptionId
     }
 
     // Search contacts on query update (debounced, including blank queries)
@@ -164,7 +169,15 @@ fun ComposeScreen(
                                 SimFieldIndicator(
                                     sims = sims,
                                     selectedId = selectedSimId,
-                                    onCycle = { selectedSimId = nextSimId(sims, selectedSimId) }
+                                    onCycle = {
+                                        val next = nextSimId(sims, selectedSimId)
+                                        selectedSimId = next
+                                        if (next != null) {
+                                            coroutineScope.launch {
+                                                repository.saveManualSimFor(recipient, next)
+                                            }
+                                        }
+                                    }
                                 )
                             },
                             modifier = Modifier
@@ -195,7 +208,6 @@ fun ComposeScreen(
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         } else if (result.storedInProvider) {
-                                            selectedSimId?.let { repository.saveLastSimFor(recipient, it) }
                                             val threadId = repository.getOrCreateThreadId(recipient)
                                             onNavigateToChat(
                                                 ChatNav(

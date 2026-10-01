@@ -8,6 +8,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.provider.ContactsContract
@@ -23,6 +24,8 @@ import com.miss.ga.data.model.FilterAction
 import com.miss.ga.data.model.SearchMessageResult
 import com.miss.ga.data.model.SenderPreference
 import com.miss.ga.data.model.SimOption
+import com.miss.ga.data.model.SimPick
+import com.miss.ga.data.model.ReplySimDefaults
 import com.miss.ga.data.model.SmsMessage
 import com.miss.ga.data.util.PhoneNumberKeys
 import com.miss.ga.engine.FilterRulesCache
@@ -38,6 +41,15 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicLong
 
 private const val TAG = "SmsRepository"
+
+private const val SIM_KEY_PREFIX = "sim_"
+private const val SIM_PICKED_AT_PREFIX = "simAt_"
+
+// _id breaks ties so multi-part messages sharing a timestamp stay deterministic.
+private val INBOUND_ORDER = "${Telephony.Sms.DATE} DESC, ${Telephony.Sms._ID} DESC"
+
+/** The SIM that received a conversation's newest inbound message. */
+data class InboundSimHint(val messageId: Long, val subscriptionId: Int?)
 
 class SmsRepository(private val context: Context) {
 
@@ -128,14 +140,139 @@ class SmsRepository(private val context: Context) {
 
     private fun simPrefs() = context.getSharedPreferences("sim_prefs", Context.MODE_PRIVATE)
 
-    fun lastSimFor(address: String): Int? {
-        val key = "sim_" + dbHelper.normalizeAddress(address)
-        val id = simPrefs().getInt(key, SubscriptionManager.INVALID_SUBSCRIPTION_ID)
-        return if (id == SubscriptionManager.INVALID_SUBSCRIPTION_ID) null else id
+    private fun readInboundSimRow(cursor: Cursor): InboundSimHint? {
+        val idIdx = cursor.getColumnIndex(Telephony.Sms._ID)
+        val subIdx = cursor.getColumnIndex(Telephony.Sms.SUBSCRIPTION_ID)
+        if (idIdx < 0 || !cursor.moveToFirst()) return null
+        val messageId = cursor.getLong(idIdx)
+        val subscriptionId = if (subIdx >= 0 && !cursor.isNull(subIdx)) {
+            cursor.getInt(subIdx).takeIf { id -> id != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
+        } else null
+        return InboundSimHint(messageId, subscriptionId)
     }
 
-    fun saveLastSimFor(address: String, subscriptionId: Int) {
-        simPrefs().edit().putInt("sim_" + dbHelper.normalizeAddress(address), subscriptionId).apply()
+    /** Newest inbound message of a thread: exact match, no address-spelling guessing. */
+    private fun latestInboundSimForThread(threadId: Long): InboundSimHint? {
+        if (threadId <= 0L) return null
+        return try {
+            context.contentResolver.query(
+                Telephony.Sms.Inbox.CONTENT_URI,
+                arrayOf(Telephony.Sms._ID, Telephony.Sms.SUBSCRIPTION_ID),
+                "${Telephony.Sms.THREAD_ID} = ?",
+                arrayOf(threadId.toString()),
+                INBOUND_ORDER
+            )?.use { readInboundSimRow(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not resolve latest inbound SIM for thread $threadId", e)
+            null
+        }
+    }
+
+    /** Newest inbound message of [address]: falls back to every known spelling of the number. */
+    private fun latestInboundSimForAddress(address: String): InboundSimHint? {
+        val keys = PhoneNumberKeys.keys(address).toTypedArray()
+        if (keys.isEmpty()) return null
+        return try {
+            context.contentResolver.query(
+                Telephony.Sms.Inbox.CONTENT_URI,
+                arrayOf(Telephony.Sms._ID, Telephony.Sms.SUBSCRIPTION_ID),
+                "${Telephony.Sms.ADDRESS} IN (${keys.joinToString(",") { "?" }})",
+                keys,
+                INBOUND_ORDER
+            )?.use { readInboundSimRow(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not resolve latest inbound SIM for ${PhoneNumberKeys.redact(address)}", e)
+            null
+        }
+    }
+
+    /**
+     * SIM to send a reply with: the manual pick while it is still valid, otherwise the SIM
+     * that received the newest inbound message, otherwise null (system default).
+     *
+     * Callers that already hold the newest inbound message pass it as [knownInbound] so no
+     * extra provider query is needed.
+     */
+    suspend fun resolveReplySubscription(
+        address: String,
+        knownInbound: InboundSimHint? = null,
+        activeSubscriptionIds: Set<Int>? = null
+    ): Int? = withContext(Dispatchers.IO) {
+        val prefs = simPrefs()
+        val key = dbHelper.normalizeAddress(address)
+        val manualId = prefs.getInt(SIM_KEY_PREFIX + key, SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+            .takeIf { it != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
+        val manualPickedAt = prefs.getLong(SIM_PICKED_AT_PREFIX + key, 0L)
+        val latest = knownInbound ?: latestInboundSimForAddress(address)
+        ReplySimDefaults.resolve(
+            manualSubscriptionId = manualId,
+            manualPickedAtMessageId = manualPickedAt,
+            latestInboundMessageId = latest?.messageId ?: 0L,
+            latestInboundSubscriptionId = latest?.subscriptionId,
+            activeSubscriptionIds = activeSubscriptionIds.orEmpty()
+        )
+    }
+
+    /** Thread-scoped variant for callers that already know the conversation id. */
+    suspend fun resolveReplySubscriptionForThread(
+        threadId: Long,
+        address: String,
+        activeSubscriptionIds: Set<Int>? = null
+    ): Int? = withContext(Dispatchers.IO) {
+        val prefs = simPrefs()
+        val key = dbHelper.normalizeAddress(address)
+        val manualId = prefs.getInt(SIM_KEY_PREFIX + key, SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+            .takeIf { it != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
+        val manualPickedAt = prefs.getLong(SIM_PICKED_AT_PREFIX + key, 0L)
+        val latest = latestInboundSimForThread(threadId)
+        ReplySimDefaults.resolve(
+            manualSubscriptionId = manualId,
+            manualPickedAtMessageId = manualPickedAt,
+            latestInboundMessageId = latest?.messageId ?: 0L,
+            latestInboundSubscriptionId = latest?.subscriptionId,
+            activeSubscriptionIds = activeSubscriptionIds.orEmpty()
+        )
+    }
+
+    /** Records a manual pick; it stays in effect until a newer inbound message arrives. */
+    suspend fun saveManualSimFor(
+        address: String,
+        subscriptionId: Int,
+        knownInbound: InboundSimHint? = null
+    ) = withContext(Dispatchers.IO) {
+        val key = dbHelper.normalizeAddress(address)
+        val pickedAt = (knownInbound ?: latestInboundSimForAddress(address))?.messageId ?: 0L
+        simPrefs().edit()
+            .putInt(SIM_KEY_PREFIX + key, subscriptionId)
+            .putLong(SIM_PICKED_AT_PREFIX + key, pickedAt)
+            .apply()
+    }
+
+    /** All persisted per-conversation SIM picks, for settings backup. */
+    fun allManualSimPicks(): List<SimPick> {
+        val picks = mutableListOf<SimPick>()
+        for ((key, value) in simPrefs().all) {
+            if (!key.startsWith(SIM_KEY_PREFIX) || value !is Int) continue
+            val address = key.removePrefix(SIM_KEY_PREFIX)
+            picks.add(
+                SimPick(
+                    address = address,
+                    subscriptionId = value,
+                    pickedAtMessageId = simPrefs().getLong(SIM_PICKED_AT_PREFIX + address, 0L)
+                )
+            )
+        }
+        return picks
+    }
+
+    /** Replaces every per-conversation SIM pick, for settings restore. */
+    fun replaceManualSimPicks(picks: List<SimPick>) {
+        val editor = simPrefs().edit().clear()
+        for (pick in picks) {
+            editor.putInt(SIM_KEY_PREFIX + pick.address, pick.subscriptionId)
+            editor.putLong(SIM_PICKED_AT_PREFIX + pick.address, pick.pickedAtMessageId)
+        }
+        editor.apply()
     }
 
     suspend fun getCachedThreads(): List<ConversationThread> =
@@ -501,9 +638,6 @@ class SmsRepository(private val context: Context) {
         messages.reverse()
         messages
     }
-
-    suspend fun sendSms(address: String, body: String): SendSmsResult =
-        sendSms(address, body, subscriptionId = null)
 
     suspend fun sendSms(address: String, body: String, subscriptionId: Int?): SendSmsResult = withContext(Dispatchers.IO) {
         if (address.isBlank() || body.isBlank()) {

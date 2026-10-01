@@ -34,7 +34,9 @@ class NotificationActionReceiver : BroadcastReceiver() {
                             Log.w(TAG, "Direct reply ignored: missing ${PhoneNumberKeys.redact(address)} or body")
                             return@launch
                         }
-                        SmsRepository(context).sendSms(address, replyBody)
+                        val repository = SmsRepository(context)
+                        val subscriptionId = repository.resolveReplySubscriptionForThread(threadId, address)
+                        repository.sendSms(address, replyBody, subscriptionId)
                     }
                     NotificationActions.ACTION_MARK_READ -> Unit
                     else -> return@launch

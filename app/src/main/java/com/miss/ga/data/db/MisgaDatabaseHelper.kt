@@ -5,6 +5,9 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.miss.ga.data.model.BackupPredefinedSetting
+import com.miss.ga.data.model.BackupRule
+import com.miss.ga.data.model.BackupSenderPreference
 import com.miss.ga.data.model.ConversationThread
 import com.miss.ga.data.model.FilterAction
 import com.miss.ga.data.model.FilterRule
@@ -480,6 +483,162 @@ class MisgaDatabaseHelper private constructor(context: Context) :
             cv,
             SQLiteDatabase.CONFLICT_REPLACE
         )
+        _prefsChanged.value = System.currentTimeMillis()
+    }
+
+    // --- Manual Settings Backup / Restore ---
+
+    suspend fun exportCustomRules(): List<BackupRule> = withContext(Dispatchers.IO) {
+        val rules = mutableListOf<BackupRule>()
+        readableDatabase.query(
+            "filter_rules", null, null, null, null, null,
+            "sort_order ASC, created_at DESC"
+        ).use {
+            while (it.moveToNext()) {
+                rules.add(
+                    BackupRule(
+                        name = it.getString(it.getColumnIndexOrThrow("name")),
+                        pattern = it.getString(it.getColumnIndexOrThrow("pattern")),
+                        isRegex = it.getInt(it.getColumnIndexOrThrow("is_regex")) == 1,
+                        action = it.getString(it.getColumnIndexOrThrow("action")),
+                        listType = it.getString(it.getColumnIndexOrThrow("list_type")),
+                        isEnabled = it.getInt(it.getColumnIndexOrThrow("is_enabled")) == 1,
+                        category = it.getString(it.getColumnIndexOrThrow("category")),
+                        senderTarget = it.getString(it.getColumnIndex("sender_target")),
+                        description = it.getString(it.getColumnIndex("description")) ?: "",
+                        sortOrder = it.getInt(it.getColumnIndexOrThrow("sort_order")),
+                        createdAt = it.getLong(it.getColumnIndexOrThrow("created_at"))
+                    )
+                )
+            }
+        }
+        rules
+    }
+
+    suspend fun exportSenderPreferences(): List<BackupSenderPreference> = withContext(Dispatchers.IO) {
+        val prefs = mutableListOf<BackupSenderPreference>()
+        readableDatabase.query(
+            "sender_preferences", null, null, null, null, null, null
+        ).use {
+            val idx = SenderPreferenceIndices(it)
+            while (it.moveToNext()) {
+                val pref = readSenderPreference(it, idx)
+                prefs.add(
+                    BackupSenderPreference(
+                        address = pref.address,
+                        displayName = pref.displayName,
+                        defaultAction = pref.defaultAction.name,
+                        customSoundUri = pref.customSoundUri,
+                        isBlocked = pref.isBlocked,
+                        notes = pref.notes,
+                        updatedAt = pref.updatedAt
+                    )
+                )
+            }
+        }
+        prefs
+    }
+
+    suspend fun exportPredefinedSettings(): List<BackupPredefinedSetting> = withContext(Dispatchers.IO) {
+        val settings = mutableListOf<BackupPredefinedSetting>()
+        readableDatabase.query(
+            "predefined_rule_settings", null, null, null, null, null, null
+        ).use {
+            val ruleIdIdx = it.getColumnIndexOrThrow("rule_id")
+            val nameIdx = it.getColumnIndex("name")
+            val patternIdx = it.getColumnIndex("pattern")
+            val isRegexIdx = it.getColumnIndex("is_regex")
+            val actionIdx = it.getColumnIndex("action")
+            val listTypeIdx = it.getColumnIndex("list_type")
+            val isEnabledIdx = it.getColumnIndex("is_enabled")
+            val isDeletedIdx = it.getColumnIndex("is_deleted")
+            val descIdx = it.getColumnIndex("description")
+            val isCustomizedIdx = it.getColumnIndex("is_customized")
+            while (it.moveToNext()) {
+                settings.add(
+                    BackupPredefinedSetting(
+                        ruleId = it.getLong(ruleIdIdx),
+                        name = if (nameIdx >= 0) it.getString(nameIdx) else null,
+                        pattern = if (patternIdx >= 0) it.getString(patternIdx) else null,
+                        isRegex = if (isRegexIdx >= 0 && !it.isNull(isRegexIdx)) it.getInt(isRegexIdx) == 1 else null,
+                        action = it.getString(actionIdx),
+                        listType = if (listTypeIdx >= 0) it.getString(listTypeIdx) else null,
+                        isEnabled = it.getInt(isEnabledIdx) == 1,
+                        isDeleted = isDeletedIdx >= 0 && it.getInt(isDeletedIdx) == 1,
+                        description = if (descIdx >= 0) it.getString(descIdx) else null,
+                        isCustomized = isCustomizedIdx >= 0 && it.getInt(isCustomizedIdx) == 1
+                    )
+                )
+            }
+        }
+        settings
+    }
+
+    /**
+     * Replaces every hand-made setting with [backup]'s content in one transaction:
+     * current custom rules, sender preferences and shipped-rule overrides are dropped first.
+     */
+    suspend fun restoreManualSettings(
+        customRules: List<BackupRule>,
+        senderPreferences: List<BackupSenderPreference>,
+        predefinedSettings: List<BackupPredefinedSetting>
+    ) = withContext(Dispatchers.IO) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("filter_rules", null, null)
+            db.delete("sender_preferences", null, null)
+            db.delete("predefined_rule_settings", null, null)
+
+            for (rule in customRules) {
+                db.insert("filter_rules", null, ContentValues().apply {
+                    put("name", rule.name)
+                    put("pattern", rule.pattern)
+                    put("is_regex", if (rule.isRegex) 1 else 0)
+                    put("action", rule.action)
+                    put("list_type", rule.listType)
+                    put("is_enabled", if (rule.isEnabled) 1 else 0)
+                    put("is_predefined", 0)
+                    put("category", rule.category)
+                    put("sender_target", rule.senderTarget)
+                    put("description", rule.description)
+                    put("sort_order", rule.sortOrder)
+                    put("created_at", rule.createdAt)
+                })
+            }
+
+            for (pref in senderPreferences) {
+                db.insert("sender_preferences", null, ContentValues().apply {
+                    put("address", pref.address)
+                    put("display_name", pref.displayName)
+                    put("default_action", pref.defaultAction)
+                    put("custom_sound_uri", pref.customSoundUri)
+                    put("is_blocked", if (pref.isBlocked) 1 else 0)
+                    put("notes", pref.notes)
+                    put("updated_at", pref.updatedAt)
+                })
+            }
+
+            for (setting in predefinedSettings) {
+                db.insert("predefined_rule_settings", null, ContentValues().apply {
+                    put("rule_id", setting.ruleId)
+                    put("name", setting.name)
+                    put("pattern", setting.pattern)
+                    setting.isRegex?.let { put("is_regex", if (it) 1 else 0) }
+                    put("action", setting.action)
+                    put("list_type", setting.listType)
+                    put("is_enabled", if (setting.isEnabled) 1 else 0)
+                    put("is_deleted", if (setting.isDeleted) 1 else 0)
+                    put("description", setting.description)
+                    put("is_customized", if (setting.isCustomized) 1 else 0)
+                })
+            }
+
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        _rulesChanged.value = System.currentTimeMillis()
         _prefsChanged.value = System.currentTimeMillis()
     }
 

@@ -46,12 +46,17 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.MarkChatRead
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
@@ -100,6 +105,8 @@ import com.miss.ga.ChatNav
 import com.miss.ga.R
 import com.miss.ga.data.model.ConversationThread
 import com.miss.ga.data.model.SearchMessageResult
+import com.miss.ga.data.repository.BackupFormatException
+import com.miss.ga.data.repository.SettingsBackupRepository
 import com.miss.ga.theme.PillShape
 import com.miss.ga.ui.components.ConversationAvatar
 import com.miss.ga.ui.components.DefaultSmsBanner
@@ -800,11 +807,113 @@ private fun ConversationsTopBar(
                         )
                     }
                 }
+
+                SettingsOverflowMenu()
             },
             windowInsets = TopAppBarDefaults.windowInsets,
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = MaterialTheme.colorScheme.surface
             )
+        )
+    }
+}
+
+@Composable
+private fun SettingsOverflowMenu() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val repository = remember(context) { SettingsBackupRepository(context) }
+    var expanded by remember { mutableStateOf(false) }
+    var pendingRestore by remember { mutableStateOf<Uri?>(null) }
+    var busy by remember { mutableStateOf(false) }
+
+    val restoreLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) pendingRestore = uri
+    }
+
+    val exportBackup: () -> Unit = {
+        scope.launch {
+            busy = true
+            try {
+                val uri = repository.writeBackupFile(repository.exportJson())
+                context.startActivity(repository.buildShareIntent(uri))
+            } catch (e: Exception) {
+                Toast.makeText(context, "Couldn't create backup: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    Box {
+        IconButton(onClick = { expanded = true }, enabled = !busy) {
+            Icon(
+                imageVector = Icons.Default.MoreVert,
+                contentDescription = "More options",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("Backup settings") },
+                leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
+                onClick = {
+                    expanded = false
+                    exportBackup()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Restore settings") },
+                leadingIcon = { Icon(Icons.Default.Restore, contentDescription = null) },
+                onClick = {
+                    expanded = false
+                    restoreLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                }
+            )
+        }
+    }
+
+    val restoreUri = pendingRestore
+    if (restoreUri != null) {
+        AlertDialog(
+            onDismissRequest = { pendingRestore = null },
+            title = { Text("Restore settings?") },
+            text = {
+                Text(
+                    "Your current spam numbers, custom rules and preset changes will be " +
+                        "permanently replaced with the ones in the backup file."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingRestore = null
+                        scope.launch {
+                            busy = true
+                            val message = try {
+                                val text = repository.readText(restoreUri)
+                                    ?: throw BackupFormatException("Couldn't open the selected file.")
+                                val backup = repository.restoreJson(text)
+                                "Restored ${backup.itemCount} settings"
+                            } catch (e: Exception) {
+                                e.message ?: "Restore failed"
+                            }
+                            busy = false
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    enabled = !busy
+                ) {
+                    Text("Restore")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRestore = null }) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 }

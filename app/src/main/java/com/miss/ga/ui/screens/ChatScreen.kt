@@ -83,6 +83,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.miss.ga.ChatNav
 import com.miss.ga.data.model.SimOption
 import com.miss.ga.data.model.SmsMessage
+import com.miss.ga.data.repository.InboundSimHint
 import com.miss.ga.data.repository.SmsRepository
 import com.miss.ga.theme.InputBarShape
 import com.miss.ga.theme.PillShape
@@ -134,15 +135,25 @@ fun ChatScreen(
     var showSettingsSheet by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // Dual-SIM send selector: loads once per conversation; hidden on single-SIM.
+    // Dual-SIM send selector: hidden on single-SIM. Defaults to the SIM that received the
+    // newest inbound message; a manual pick holds until the next inbound message arrives.
     val simRepository = remember(context) { SmsRepository(context) }
     var sims by remember { mutableStateOf<List<SimOption>>(emptyList()) }
     var selectedSimId by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(nav.address) {
-        val list = simRepository.availableSims()
-        sims = list
-        selectedSimId = simRepository.lastSimFor(nav.address)
-            ?: list.firstOrNull()?.subscriptionId
+    LaunchedEffect(Unit) {
+        sims = simRepository.availableSims()
+    }
+    // Taken from the loaded messages: the SIM caption on each bubble proves this is populated,
+    // so the chat screen needs no extra provider query.
+    val newestInbound = state.messages.lastOrNull { it.isInbox }
+    LaunchedEffect(nav.address, newestInbound?.id, sims) {
+        if (sims.isEmpty()) return@LaunchedEffect
+        val hint = newestInbound?.let {
+            InboundSimHint(messageId = it.id, subscriptionId = it.subscriptionId)
+        }
+        val resolved = simRepository.resolveReplySubscription(nav.address, hint)
+        selectedSimId = resolved?.takeIf { id -> sims.any { it.subscriptionId == id } }
+            ?: sims.firstOrNull()?.subscriptionId
     }
 
     var selectedMessageForDialog by remember { mutableStateOf<SmsMessage?>(null) }
@@ -343,7 +354,18 @@ fun ChatScreen(
                                 SimFieldIndicator(
                                     sims = sims,
                                     selectedId = selectedSimId,
-                                    onCycle = { selectedSimId = nextSimId(sims, selectedSimId) }
+                                    onCycle = {
+                                        val next = nextSimId(sims, selectedSimId)
+                                        selectedSimId = next
+                                        if (next != null) {
+                                            val hint = newestInbound?.let {
+                                                InboundSimHint(it.id, it.subscriptionId)
+                                            }
+                                            coroutineScope.launch {
+                                                simRepository.saveManualSimFor(nav.address, next, hint)
+                                            }
+                                        }
+                                    }
                                 )
                             },
                             modifier = Modifier

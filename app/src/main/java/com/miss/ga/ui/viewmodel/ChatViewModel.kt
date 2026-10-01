@@ -246,7 +246,6 @@ class ChatViewModel(
             val result = repository.sendSms(initialAddress, text, subscriptionId)
             _uiState.value = _uiState.value.copy(isSending = false)
             if (result.sent) {
-                if (subscriptionId != null) repository.saveLastSimFor(initialAddress, subscriptionId)
                 loadMessages()
             }
             onComplete(result)

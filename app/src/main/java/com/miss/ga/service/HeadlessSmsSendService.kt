@@ -44,7 +44,7 @@ class HeadlessSmsSendService : Service() {
         val repository = SmsRepository(applicationContext)
         for (address in addresses) {
             try {
-                val result = repository.sendSms(address, body)
+                val result = repository.sendSms(address, body, repository.resolveReplySubscription(address))
                 if (!result.sent) {
                     Log.e(TAG, "Failed to send quick reply to ${PhoneNumberKeys.redact(address)}")
                 }

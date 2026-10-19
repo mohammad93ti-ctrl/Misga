@@ -129,6 +129,14 @@ fun ChatScreen(
         viewModel.setScreenResumed(false)
     }
 
+    // One-shot status messages from the view model (e.g. duplicate allowlist guard).
+    LaunchedEffect(state.toastMessage) {
+        state.toastMessage?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            viewModel.clearToast()
+        }
+    }
+
     var inputText by remember { mutableStateOf("") }
     var showSettingsSheet by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)

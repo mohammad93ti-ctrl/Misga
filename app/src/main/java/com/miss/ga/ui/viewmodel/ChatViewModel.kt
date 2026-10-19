@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class ChatUiState(
     val isLoading: Boolean = true,
@@ -40,7 +42,9 @@ data class ChatUiState(
     val hasMoreOlder: Boolean = true,
     val isLoadingOlder: Boolean = false,
     /** Thread holds only MMS/picture messages, which Misga cannot render yet. */
-    val hasMmsOnly: Boolean = false
+    val hasMmsOnly: Boolean = false,
+    /** One-shot status message shown as a Toast by the chat screen. */
+    val toastMessage: String? = null
 )
 
 class ChatViewModel(
@@ -68,6 +72,9 @@ class ChatViewModel(
         )
     )
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    /** Serializes allowlist toggles: the re-check and the insert stay atomic. */
+    private val allowlistToggleMutex = Mutex()
 
     init {
         registerSmsContentObserver()
@@ -318,39 +325,58 @@ class ChatViewModel(
     }
 
     /**
-     * Toggles the per-sender allowlist: while active, a ".*" ALLOWLIST rule for this
-     * sender makes the filter engine return NORMAL before every keyword blocklist runs.
-     * Enabling also clears a SPAM block set on this contact.
+     * Toggles the per-sender allowlist request button semantics:
+     * - no allowlist rule yet  -> creates one ".*" ALLOWLIST rule for this sender
+     *   (the filter engine then returns NORMAL before every keyword blocklist runs).
+     * - rule already exists    -> reports "already allowlisted", inserts nothing, and
+     *   collapses any duplicate allowlist rules left by older versions.
+     * Rapid double-taps are serialized by [allowlistToggleMutex] so the DB check and
+     * the insert cannot race into two rows.
      */
     fun toggleSenderAllowlist() {
         viewModelScope.launch {
-            val existing = dbHelper.getSenderRules(initialAddress)
-                .firstOrNull { it.listType == RuleListType.ALLOWLIST }
-            if (existing != null) {
-                dbHelper.deleteRule(existing.id)
-            } else {
-                val pref = _uiState.value.senderPreference
-                if (pref != null && (pref.isBlocked || pref.defaultAction != FilterAction.NORMAL)) {
-                    val cleared = pref.copy(defaultAction = FilterAction.NORMAL, isBlocked = false)
-                    dbHelper.saveSenderPreference(cleared)
-                    _uiState.value = _uiState.value.copy(senderPreference = cleared)
-                }
-                dbHelper.insertCustomRule(
-                    FilterRule(
-                        name = "Allowlist for $initialAddress",
-                        pattern = ".*",
-                        isRegex = true,
-                        action = FilterAction.NORMAL,
-                        isEnabled = true,
-                        isPredefined = false,
-                        category = RuleCategory.CUSTOM_ALLOWLIST,
-                        senderTarget = initialAddress,
-                        description = "Trusted sender: all messages bypass filters"
+            allowlistToggleMutex.withLock {
+                val senderAllowRules = dbHelper.getSenderRules(initialAddress)
+                    .filter { it.listType == RuleListType.ALLOWLIST }
+                val existing = senderAllowRules.firstOrNull()
+                if (existing != null) {
+                    senderAllowRules.drop(1).forEach { duplicate -> dbHelper.deleteRule(duplicate.id) }
+                    _uiState.value = _uiState.value.copy(
+                        toastMessage = if (senderAllowRules.size > 1)
+                            "Already allowlisted — duplicate rules cleaned up"
+                        else
+                            "This sender is already allowlisted"
                     )
-                )
+                    loadSenderSettings()
+                } else {
+                    val pref = _uiState.value.senderPreference
+                    if (pref != null && (pref.isBlocked || pref.defaultAction != FilterAction.NORMAL)) {
+                        val cleared = pref.copy(defaultAction = FilterAction.NORMAL, isBlocked = false)
+                        dbHelper.saveSenderPreference(cleared)
+                        _uiState.value = _uiState.value.copy(senderPreference = cleared)
+                    }
+                    dbHelper.insertCustomRule(
+                        FilterRule(
+                            name = "Allowlist for $initialAddress",
+                            pattern = ".*",
+                            isRegex = true,
+                            action = FilterAction.NORMAL,
+                            isEnabled = true,
+                            isPredefined = false,
+                            category = RuleCategory.CUSTOM_ALLOWLIST,
+                            senderTarget = initialAddress,
+                            description = "Trusted sender: all messages bypass filters"
+                        )
+                    )
+                    loadSenderSettings()
+                }
             }
-            loadSenderSettings()
         }
+    }
+
+    /** Clears the pending one-shot status message. */
+    fun clearToast() {
+        _uiState.value = _uiState.value.copy(toastMessage = null)
     }
 
     /** Removes one sender-specific rule (including the allowlist rule) by id. */

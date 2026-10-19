@@ -78,3 +78,4 @@ Thumbs.db
 # Release signing keys (do not commit)
 /keystore/
 *.jks
+*.txt

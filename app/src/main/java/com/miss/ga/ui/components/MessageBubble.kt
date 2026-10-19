@@ -146,15 +146,14 @@ fun MessageBubble(
                         )
                     }
                     Spacer(modifier = Modifier.width(4.dp))
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier.size(16.dp)
-                    ) {
+                    // Default IconButton sizing: 48dp touch target (accessibility minimum),
+                    // small visual glyph keeps the bubble row from ballooning.
+                    IconButton(onClick = onDelete) {
                         Icon(
                             imageVector = Icons.Default.Delete,
                             contentDescription = "Delete",
-                            tint = contentColor.copy(alpha = 0.5f),
-                            modifier = Modifier.size(13.dp)
+                            tint = contentColor.copy(alpha = 0.55f),
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }

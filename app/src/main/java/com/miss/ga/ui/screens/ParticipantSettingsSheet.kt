@@ -18,9 +18,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -28,6 +30,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.ModalBottomSheet
@@ -51,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.miss.ga.data.model.FilterAction
 import com.miss.ga.data.model.FilterRule
+import com.miss.ga.data.model.RuleListType
 import com.miss.ga.data.model.SenderPreference
 import com.miss.ga.data.model.displayLabel
 import com.miss.ga.theme.OnSuccessContainerDark
@@ -70,6 +74,10 @@ import com.miss.ga.ui.components.ConversationAvatar
 import com.miss.ga.ui.util.senderDisplayName
 import com.miss.ga.ui.util.contentAware
 
+/** True while this sender has an enabled ALLOWLIST rule protecting every message. */
+private fun isAllowlisted(senderRules: List<FilterRule>) =
+    senderRules.any { it.listType == RuleListType.ALLOWLIST && it.isEnabled }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ParticipantSettingsSheet(
@@ -80,7 +88,9 @@ fun ParticipantSettingsSheet(
     sheetState: SheetState,
     onDismiss: () -> Unit,
     onUpdateAction: (FilterAction) -> Unit,
-    onAddSenderRule: (pattern: String, isRegex: Boolean, action: FilterAction, name: String) -> Unit
+    onAddSenderRule: (pattern: String, isRegex: Boolean, action: FilterAction, name: String) -> Unit,
+    onAllowlistToggle: () -> Unit,
+    onDeleteRule: (FilterRule) -> Unit
 ) {
     var showAddRuleDialog by remember { mutableStateOf(false) }
 
@@ -185,6 +195,23 @@ fun ParticipantSettingsSheet(
                         selectedIconTint = MaterialTheme.colorScheme.error,
                         onClick = { onUpdateAction(FilterAction.SPAM) }
                     )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                    )
+                    // Allowlist: every message from this sender bypasses ALL filter rules,
+                    // including global keyword blocks and the predefined Iranian blocklist.
+                    ActionOptionRow(
+                        title = "Allowlisted (Trusted)",
+                        subtitle = "Never blocked — all messages bypass every filter rule",
+                        icon = Icons.Default.Verified,
+                        selected = isAllowlisted(senderRules),
+                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        selectedIconTint = MaterialTheme.colorScheme.primary,
+                        onClick = onAllowlistToggle
+                    )
                 }
             }
 
@@ -253,14 +280,29 @@ fun ParticipantSettingsSheet(
                                 }
                                 Surface(
                                     shape = PillShape,
-                                    color = if (rule.action == FilterAction.SPAM) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer
+                                    color = if (rule.listType == RuleListType.ALLOWLIST) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else if (rule.action == FilterAction.SPAM) {
+                                        MaterialTheme.colorScheme.errorContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainerHigh
+                                    }
                                 ) {
                                     Text(
-                                        text = rule.action.displayLabel,
+                                        text = if (rule.listType == RuleListType.ALLOWLIST) "Allowlist" else rule.action.displayLabel,
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (rule.action == FilterAction.SPAM) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                                        color = if (rule.listType == RuleListType.ALLOWLIST) MaterialTheme.colorScheme.primary else if (rule.action == FilterAction.SPAM) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface,
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
+                                // Removal affordance — otherwise allowlist rules could not be undone here.
+                                IconButton(onClick = { onDeleteRule(rule) }, modifier = Modifier.size(24.dp)) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete rule",
+                                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                                        modifier = Modifier.size(16.dp)
                                     )
                                 }
                             }

@@ -13,6 +13,7 @@ import com.miss.ga.data.db.MisgaDatabaseHelper
 import com.miss.ga.data.model.FilterAction
 import com.miss.ga.data.model.FilterRule
 import com.miss.ga.data.model.RuleCategory
+import com.miss.ga.data.model.RuleListType
 import com.miss.ga.data.model.SenderPreference
 import com.miss.ga.data.model.SmsMessage
 import com.miss.ga.data.repository.SendSmsResult
@@ -312,6 +313,50 @@ class ChatViewModel(
                 description = "Sender-specific rule"
             )
             dbHelper.insertCustomRule(rule)
+            loadSenderSettings()
+        }
+    }
+
+    /**
+     * Toggles the per-sender allowlist: while active, a ".*" ALLOWLIST rule for this
+     * sender makes the filter engine return NORMAL before every keyword blocklist runs.
+     * Enabling also clears a SPAM block set on this contact.
+     */
+    fun toggleSenderAllowlist() {
+        viewModelScope.launch {
+            val existing = dbHelper.getSenderRules(initialAddress)
+                .firstOrNull { it.listType == RuleListType.ALLOWLIST }
+            if (existing != null) {
+                dbHelper.deleteRule(existing.id)
+            } else {
+                val pref = _uiState.value.senderPreference
+                if (pref != null && (pref.isBlocked || pref.defaultAction != FilterAction.NORMAL)) {
+                    val cleared = pref.copy(defaultAction = FilterAction.NORMAL, isBlocked = false)
+                    dbHelper.saveSenderPreference(cleared)
+                    _uiState.value = _uiState.value.copy(senderPreference = cleared)
+                }
+                dbHelper.insertCustomRule(
+                    FilterRule(
+                        name = "Allowlist for $initialAddress",
+                        pattern = ".*",
+                        isRegex = true,
+                        action = FilterAction.NORMAL,
+                        isEnabled = true,
+                        isPredefined = false,
+                        category = RuleCategory.CUSTOM_ALLOWLIST,
+                        senderTarget = initialAddress,
+                        description = "Trusted sender: all messages bypass filters"
+                    )
+                )
+            }
+            loadSenderSettings()
+        }
+    }
+
+    /** Removes one sender-specific rule (including the allowlist rule) by id. */
+    fun deleteSenderRule(ruleId: Long) {
+        viewModelScope.launch {
+            dbHelper.deleteRule(ruleId)
             loadSenderSettings()
         }
     }

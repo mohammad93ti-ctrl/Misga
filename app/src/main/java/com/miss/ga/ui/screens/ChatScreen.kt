@@ -537,6 +537,12 @@ fun ChatScreen(
             },
             onAddSenderRule = { pattern, isRegex, action, name ->
                 viewModel.addSenderRule(pattern, isRegex, action, name)
+            },
+            onAllowlistToggle = remember(viewModel) {
+                { viewModel.toggleSenderAllowlist() }
+            },
+            onDeleteRule = remember(viewModel) {
+                { rule -> viewModel.deleteSenderRule(rule.id) }
             }
         )
     }

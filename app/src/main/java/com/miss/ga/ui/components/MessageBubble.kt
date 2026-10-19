@@ -1,7 +1,6 @@
 package com.miss.ga.ui.components
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,11 +11,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -24,7 +26,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
@@ -38,7 +39,7 @@ import com.miss.ga.ui.util.contentAware
 @Composable
 fun MessageBubble(
     message: SmsMessage,
-    onLongClick: () -> Unit,
+    onDelete: () -> Unit,
     modifier: Modifier = Modifier,
     isHighlighted: Boolean = false,
     simLabel: String? = null
@@ -78,22 +79,21 @@ fun MessageBubble(
             shadowElevation = 0.dp,
             modifier = Modifier
                 .widthIn(min = 80.dp, max = 320.dp)
-                .pointerInput(onLongClick) {
-                    detectTapGestures(onLongPress = { onLongClick() })
-                }
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
             ) {
-                // Plain text: long-press opens the message options dialog, where the
-                // preview is selectable for partial copy.
-                Text(
-                    text = message.body,
-                    style = MaterialTheme.typography.bodyLarge.contentAware(),
-                    color = contentColor,
-                    lineHeight = 23.sp,
-                    letterSpacing = 0.2.sp
-                )
+                // In-bubble selectable text: long-press selects, toolbar offers
+                // Copy / Select All / Share; partial selection works natively.
+                SelectionContainer {
+                    Text(
+                        text = message.body,
+                        style = MaterialTheme.typography.bodyLarge.contentAware(),
+                        color = contentColor,
+                        lineHeight = 23.sp,
+                        letterSpacing = 0.2.sp
+                    )
+                }
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.align(Alignment.End),
@@ -142,6 +142,18 @@ fun MessageBubble(
                             imageVector = icon,
                             contentDescription = desc,
                             tint = tint,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(16.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Delete",
+                            tint = contentColor.copy(alpha = 0.5f),
                             modifier = Modifier.size(13.dp)
                         )
                     }

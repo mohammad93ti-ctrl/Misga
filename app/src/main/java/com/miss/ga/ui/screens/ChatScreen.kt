@@ -40,13 +40,11 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -156,7 +154,6 @@ fun ChatScreen(
             ?: sims.firstOrNull()?.subscriptionId
     }
 
-    var selectedMessageForDialog by remember { mutableStateOf<SmsMessage?>(null) }
     var hasInitiallyScrolled by remember(nav.threadId, nav.address, nav.initialMessageId) { mutableStateOf(false) }
     var highlightedMessageId by remember(nav.threadId, nav.address, nav.initialMessageId) {
         mutableStateOf(nav.initialMessageId)
@@ -238,10 +235,6 @@ fun ChatScreen(
     val onDeleteMessage = remember(viewModel) {
         { id: Long -> viewModel.deleteMessage(id) }
     }
-    val onLongClickMessage = remember {
-        { message: SmsMessage -> selectedMessageForDialog = message }
-    }
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -486,8 +479,7 @@ fun ChatScreen(
                     isLoadingOlder = state.isLoadingOlder,
                     onRevealToggle = onRevealToggle,
                     onMarkNotSpam = onMarkNotSpam,
-                    onDelete = onDeleteMessage,
-                    onLongClick = onLongClickMessage
+                    onDelete = onDeleteMessage
                 )
             }
 
@@ -549,66 +541,6 @@ fun ChatScreen(
         )
     }
 
-    // Message Long-Click Actions Dialog
-    selectedMessageForDialog?.let { msg ->
-        AlertDialog(
-            onDismissRequest = { selectedMessageForDialog = null },
-            shape = SquircleCardShape,
-            title = {
-                Text(
-                    text = "Message Options",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        // Selectable preview: long-press here to select and copy any part.
-                        SelectionContainer {
-                            Text(
-                                text = msg.body,
-                                style = MaterialTheme.typography.bodyMedium.contentAware(),
-                                maxLines = 4,
-                                modifier = Modifier.padding(12.dp)
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                FilledTonalButton(
-                    onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("SMS Message", msg.body))
-                        Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
-                        selectedMessageForDialog = null
-                    },
-                    shape = PillShape
-                ) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Copy", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.deleteMessage(msg.id)
-                        selectedMessageForDialog = null
-                    }
-                ) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Delete", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        )
-    }
 }
 
 @Composable
@@ -620,8 +552,7 @@ private fun ChatMessageList(
     isLoadingOlder: Boolean,
     onRevealToggle: (Long, Boolean) -> Unit,
     onMarkNotSpam: (Long) -> Unit,
-    onDelete: (Long) -> Unit,
-    onLongClick: (SmsMessage) -> Unit
+    onDelete: (Long) -> Unit
 ) {
     LazyColumn(
         state = listState,
@@ -658,7 +589,7 @@ private fun ChatMessageList(
                     message = message,
                     isHighlighted = isHighlighted,
                     simLabel = simLabel,
-                    onLongClick = { onLongClick(message) }
+                    onDelete = { onDelete(message.id) }
                 )
             }
         }

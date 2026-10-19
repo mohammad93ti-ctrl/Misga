@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
@@ -65,6 +66,9 @@ fun MessageBubble(
         else -> BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
     }
     val timeText = remember(message.date) { SmsDateFormats.clock(message.date) }
+    // Cap bubble at 80% of screen width (matching standard chat apps like
+    // WhatsApp/Telegram) so long messages keep margin on both sides.
+    val maxBubbleWidthDp = LocalConfiguration.current.screenWidthDp.dp * 0.8f
 
     Column(
         modifier = modifier
@@ -78,7 +82,7 @@ fun MessageBubble(
             border = border,
             shadowElevation = 0.dp,
             modifier = Modifier
-                .widthIn(min = 80.dp, max = 320.dp)
+                .widthIn(min = 80.dp, max = maxBubbleWidthDp)
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)

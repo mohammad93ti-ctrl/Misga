@@ -151,6 +151,10 @@ class NotificationHelper private constructor(private val context: Context) {
             .setAutoCancel(true)
             .setPriority(if (action == FilterAction.NORMAL) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+        // One-time code in the body adds a one-tap "Copy <code>" button, like Textra.
+        OtpDetector.findCode(body)?.let { otp ->
+            builder.addAction(buildCopyCodeAction(threadId, otp))
+        }
         buildActions(threadId, sender).forEach { builder.addAction(it) }
 
         try {
@@ -230,8 +234,29 @@ class NotificationHelper private constructor(private val context: Context) {
         return listOf(replyAction, markReadAction)
     }
 
+    /** One-tap "Copy <code>" action; copies exactly the detected code, then closes the notification. */
+    private fun buildCopyCodeAction(threadId: Long, code: String): NotificationCompat.Action {
+        val intent = Intent(context, NotificationActionReceiver::class.java).apply {
+            action = NotificationActions.ACTION_COPY_OTP
+            putExtra(NotificationActions.EXTRA_THREAD_ID, threadId)
+            putExtra(NotificationActions.EXTRA_OTP_CODE, code)
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            copyCodeRequestCode(threadId),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Action.Builder(
+            android.R.drawable.ic_menu_edit,
+            context.getString(R.string.notification_action_copy_code, code),
+            pendingIntent
+        ).build()
+    }
+
     private fun replyRequestCode(threadId: Long): Int = (threadId xor (threadId ushr 32)).toInt()
     private fun markReadRequestCode(threadId: Long): Int = (threadId xor (threadId ushr 32)).toInt() xor 0x4D524400.toInt()
+    private fun copyCodeRequestCode(threadId: Long): Int = (threadId xor (threadId ushr 32)).toInt() xor 0x4F545000.toInt()
 
     fun cancelNotification(threadId: Long) {
         notificationManager.cancel(notificationIdFor(threadId))

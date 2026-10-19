@@ -336,19 +336,31 @@ class ChatViewModel(
     fun toggleSenderAllowlist() {
         viewModelScope.launch {
             allowlistToggleMutex.withLock {
-                val senderAllowRules = dbHelper.getSenderRules(initialAddress)
-                    .filter { it.listType == RuleListType.ALLOWLIST }
-                val existing = senderAllowRules.firstOrNull()
-                if (existing != null) {
-                    senderAllowRules.drop(1).forEach { duplicate -> dbHelper.deleteRule(duplicate.id) }
+                val allSenderRules = dbHelper.getSenderRules(initialAddress)
+                val typedAllowRules = allSenderRules.filter { it.listType == RuleListType.ALLOWLIST }
+                // Older builds stored the allowlist as a BLOCKLIST row with action=NORMAL
+                // and pattern ".*" (listType was omitted); treat them as the same feature.
+                val legacyAllowRules = allSenderRules.filter { legacyRule ->
+                    legacyRule.listType != RuleListType.ALLOWLIST &&
+                        legacyRule.action == FilterAction.NORMAL &&
+                        legacyRule.pattern.trim() == ".*" &&
+                        !legacyRule.isPredefined
+                }
+                val keeper = typedAllowRules.firstOrNull()
+                if (keeper != null) {
+                    // Already allowlisted: insert nothing, collapse duplicate/leftover rows.
+                    val extras = typedAllowRules.drop(1) + legacyAllowRules
+                    extras.forEach { duplicate -> dbHelper.deleteRule(duplicate.id) }
                     _uiState.value = _uiState.value.copy(
-                        toastMessage = if (senderAllowRules.size > 1)
+                        toastMessage = if (extras.isNotEmpty())
                             "Already allowlisted — duplicate rules cleaned up"
                         else
                             "This sender is already allowlisted"
                     )
                     loadSenderSettings()
                 } else {
+                    // Legacy rows only: migrate to one canonical ALLOWLIST rule.
+                    legacyAllowRules.forEach { legacy -> dbHelper.deleteRule(legacy.id) }
                     val pref = _uiState.value.senderPreference
                     if (pref != null && (pref.isBlocked || pref.defaultAction != FilterAction.NORMAL)) {
                         val cleared = pref.copy(defaultAction = FilterAction.NORMAL, isBlocked = false)
@@ -361,6 +373,9 @@ class ChatViewModel(
                             pattern = ".*",
                             isRegex = true,
                             action = FilterAction.NORMAL,
+                            // Root-cause fix: without this the rule was stored as BLOCKLIST,
+                            // so the duplicate guard never found it and kept inserting rows.
+                            listType = RuleListType.ALLOWLIST,
                             isEnabled = true,
                             isPredefined = false,
                             category = RuleCategory.CUSTOM_ALLOWLIST,
